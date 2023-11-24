@@ -8,6 +8,8 @@ import uuid
 import re
 import logging
 
+from typing import List
+from time import gmtime, strftime
 from OrgExtended.orgutil.addmethod import *
 
 log = logging.getLogger(__name__)
@@ -288,3 +290,35 @@ def TEST(NAME,GOT,T,ERR):
         log.error(" [FAILED] " + NAME + " " + str(ERR) + " WANTED: " + str(T) + " GOT: " + str(GOT))
     else:
         log.info(" [PASSED] " + NAME)
+
+
+def compact(array: List) -> List:
+    """
+    Creates an array with all falsey values removed
+    (`False`, `None`, `0`, `""`, `[]` and `{}`)
+    """
+    return list(filter(None, array))
+
+
+def seconds_fmt(sec: int) -> str:
+    """
+    Convert seconds to readable format time
+    """
+    if sec > 3600:
+        return strftime('%-Hh %-Mm %-Ss', gmtime(sec))
+    elif sec > 60:
+        return strftime('%-Mm %-Ss', gmtime(sec))
+    else:
+        return '{}s'.format(sec)
+    
+
+def split_into_chunks(array: List, n: int) -> List:
+    """
+    Yield `n` number of sequential chunks from `array`.
+    """
+    def _chunks(l: List, n: int):
+        d, r = divmod(len(l), n)
+        for i in range(n):
+            si = (d+1)*(i if i < r else r) + d*(0 if i < r else i - r)
+            yield l[si:si+(d+1 if i < r else d)]
+    return compact(list(_chunks(array, n)))
