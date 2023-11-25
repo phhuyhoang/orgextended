@@ -6,9 +6,9 @@ import uuid
 import sublime
 from math import ceil
 from timeit import default_timer
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from OrgExtended.orgutil.util import seconds_fmt
+from OrgExtended.orgutil.util import safe_call, seconds_fmt
 
 
 def find_by_selectors(
@@ -119,7 +119,7 @@ def slice_regions(
     regions: Tuple[sublime.Region],
     begin: float = 0, 
     end: float = float('inf'),
-    aregion: Union[sublime.Region, None] = None
+    aregion: Optional[sublime.Region] = None
 ) -> List[sublime.Region]:
     """
     Filter regions that are within another region, returning a list of 
@@ -133,6 +133,29 @@ def slice_regions(
             sliced_regions.append(region)
     sliced_regions.sort()
     return sliced_regions
+
+
+def starmap_async(
+    callback: Callable,
+    args: List[Any] = [],
+    on_data: Callable[[Any], None] = None,
+    on_finish: Callable[[List[Any]], None] = None,
+    delay: Optional[int] = None
+) -> None:
+    """
+    Asynchronously run the same callback on every argument in parallel.
+    You can take the results via the on_finish callback
+    """
+    results = []
+    def async_operation(arg: Any) -> None:
+        result = callback(arg)
+        results.append(result)
+        if callable(on_data):
+            safe_call(on_data, [result])
+        if len(results) >= len(args):
+            safe_call(on_finish, [results])
+    for arg in args:
+        sublime.set_timeout(lambda a = arg: async_operation(a))
 
 
 class PhantomsManager:
@@ -195,7 +218,7 @@ class PhantomsManager:
     def get_pid_by_region(
         self, 
         region: sublime.Region
-    ) -> Union[int, None]:
+    ) -> Optional[int]:
         """
         Find a phantom id by provided region. Phantom ID (pid) was
         a number returned by `view.add_phantom()` method that helps
@@ -216,7 +239,7 @@ class PhantomsManager:
         """
         return self.view.query_phantom(pid)
 
-    def get_data_by_pid(self, pid: int) -> Union[Dict, None]:
+    def get_data_by_pid(self, pid: int) -> Optional[Dict]:
         """
         Get the relevant data that have been provided when the phantom
         being initialize.
@@ -330,7 +353,7 @@ class SublimeStatusIndicator:
         view: sublime.View,
         name: str,
         message: str,
-        total_count: Union[int, None] = None,
+        total_count: Optional[int] = None,
         finish_message: str = '',
         update_interval: int = 100,
     ) -> None:
@@ -363,7 +386,7 @@ class SublimeStatusIndicator:
         self.autoupdate()
         return self
 
-    def stop(self, timer_result: Union[float, None] = None) -> 'SublimeStatusIndicator':
+    def stop(self, timer_result: Optional[float] = None) -> 'SublimeStatusIndicator':
         """
         Stop the indicator once and for all. Accepts an external 
         `timer_result` to display in place of the local timer.
@@ -392,9 +415,9 @@ class SublimeStatusIndicator:
 
     def set(
         self,
-        message: Union[str, None] = None,
-        finish_message: Union[str, None] = None,
-        update_interval: Union[int, None] = None
+        message: Optional[str] = None,
+        finish_message: Optional[str] = None,
+        update_interval: Optional[int] = None
     ) -> 'SublimeStatusIndicator':
         """
         This method allow you update some things even while it is running

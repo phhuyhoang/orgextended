@@ -5,8 +5,10 @@ import sublime_plugin
 import urllib.parse
 import urllib.request
 from os import path
+from timeit import default_timer
 from sublime import Region, View
-from typing import Callable, Dict, List, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from OrgExtended.orgutil.cache import ConstrainedCache
 from OrgExtended.orgutil.sublime_utils import (
     PhantomsManager,
     SublimeStatusIndicator,
@@ -16,13 +18,17 @@ from OrgExtended.orgutil.sublime_utils import (
     region_between, 
     show_message,
     slice_regions,
+    starmap_async,
 )
-from OrgExtended.orgutil.util import split_into_chunks
+from OrgExtended.orgutil.threads import starmap_pools
 from OrgExtended.orgutil.typecompat import Literal, Point
+from OrgExtended.orgutil.util import is_iterable, safe_call, shallow_flatten, split_into_chunks
 
 STATUS_ID = 'orgextra_image'
 DEFAULT_POOL_SIZE = 10
 ONE_SECOND = 1000
+
+ImageCache = ConstrainedCache.use('orgimage', max_size = 100 * 1024 * 1024) # 100 MB
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
 SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
@@ -44,6 +50,19 @@ LIST_HEADLINE_SELECTORS = [
 
 # Types
 RegionRange = Literal['folding', 'all']
+OnData = Callable[['CachedImage'], None]
+OnError = Callable[[str], None]
+OnFinish = Callable[[List['CachedImage']], None]
+CachedImage = Dict[Literal['original_url', 'resolved_url', 'data_size'], Union[str, int]]
+
+
+def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
+    """
+    Return an object can be used to transfer between commands when one 
+    needs to signal to the others that the image has been loaded and 
+    cached on memory.
+    """
+    return { 'original_url': url, 'resolved_url': rurl, 'data_size': size }
 
 
 def extract_dimensions_from_attrs(
@@ -68,8 +87,8 @@ def extract_dimensions_from_attrs(
 def fetch_or_load_image(
     url: str, 
     cwd: str, 
-    timeout: Union[float, None] = None
-) -> Union[bytes, None]:
+    timeout: Optional[float] = None
+) -> Optional[bytes]:
     """
     Remote fetch or load from local the image binary based on the 
     matching case of provided url.
@@ -212,7 +231,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if self.view.is_scratch():
                 pass
             else:
-                pass
+                sublime.set_timeout_async(
+                    lambda: self.parallel_requests_using_threads(
+                        pools = pools,
+                        cwd = path.dirname(self.view.file_name() or ''),
+                        on_data = lambda: status.succeed(),
+                        on_error = lambda: status.failed(),
+                        on_finish = self.on_threads_finished(selected_region, status)))
 
             # Incomplete
         except Exception as error:
@@ -306,18 +331,18 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         region: Region,
         status: SublimeStatusIndicator
-    ) -> Callable[[List[Dict], int], None]:
+    ) -> Callable[[List[CachedImage], int], None]:
         """
         Chaining calls the next command to auto-render the cached images
         """
-        def on_finish(loaded_urls: List[Dict], timecost: int):
+        def on_finish(cached_images: List[CachedImage], timecost: int):
             status.stop(timecost)
             self.view.set_read_only(False)
             self.view.set_status('read_only_mode', 'writeable')
             self.view.run_command('org_extra_render_images', 
                 args = {
                     'region': region.to_tuple(),
-                    'urllist': loaded_urls,
+                    'images': cached_images,
                 }
             )
         return on_finish
@@ -327,25 +352,78 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         pools: List[List[str]],
         cwd: str,
-        on_data: Union[Callable[[Dict], None], None] = None,
-        on_error: Union[Callable[[str], None], None] = None,
-        on_finish: Union[Callable[[List[Dict], float], None], None] = None,
-        timeout: Union[float, None] = None,
+        on_data: Optional[OnData] = None,
+        on_error: Optional[OnError] = None,
+        on_finish: Optional[OnFinish] = None,
+        timeout: Optional[float] = None
     ) -> None:
-        pass
+        """
+        Asynchronously run fetching image operations, which each one
+        take a list of urls/filepaths that would be loaded one after 
+        another.
+        These are the measurement results can be compare to 
+        `.parallel_requests_using_threads()`: \n
+        - 1 image link: 1.482095375999961, 1.335890114999529, 1.298129551000784
+        - 10 image links: 8.051044771000306, 7.954113742000118, 8.047068934999515
+        - 85 image links: 93.40657268199993
+        I don't quite understand the mechanism behind this API, nor 
+        whether I am using it correctly but it doesn't seem 
+        significantly faster compared to the synchronous.
+        """
+        start = default_timer()
+        cached_images = []
+        def async_all_finish(ci: List[CachedImage]) -> None:
+            if is_iterable(ci):
+                cached_images.extend(ci)
+                if callable(on_finish):
+                    safe_call(on_finish, [cached_images, default_timer() - start])
+
+        starmap_async(
+            callback = lambda urls: self.thread_execution(
+                urls,
+                cwd,
+                on_data,
+                on_error,
+                timeout),
+            args = pools,
+            on_finish = async_all_finish)
 
 
     def parallel_requests_using_threads(
         self,
         pools: List[List[str]],
         cwd: str,
-        on_data: Union[Callable[[Dict], None], None] = None,
-        on_error: Union[Callable[[str], None], None] = None,
-        on_finish: Union[Callable[[List[Dict], float], None], None] = None,
-        timeout: Union[float, None] = None,
-    ) -> None:
-        pass
-
+        on_data: Optional[OnData] = None,
+        on_error: Optional[OnError] = None,
+        on_finish: Optional[OnFinish] = None,
+        timeout: Optional[float] = None
+    ) -> List[CachedImage]:
+        """
+        Run threads of fetching image operation in parallel, which each 
+        thread take a list of urls/filepaths that would be loaded one 
+        after another.
+        These are the measurement results can be compare to 
+        `.parallel_requests_using_sublime_timeout()`: \n
+        * 1 image link: 1.1709886939997887, 1.2005657659992721, 1.2650837740002316 \n
+        * 10 image links: 1.387642825000512, 1.5033762000002753, 2.1559584730002825 \n
+        * 85 image links: 16.07192872700034, 12.695106612000018, 9.564963673999955 \n
+        As you see, it's up to ten times faster. \n
+        And of course it's way more faster compared to the traditional method.
+        """
+        start = default_timer()
+        results = shallow_flatten(
+            starmap_pools(
+                lambda urls: self.thread_execution(
+                    urls, 
+                    cwd, 
+                    on_data, 
+                    on_error, 
+                    timeout)
+            ), pools)
+        end = default_timer()
+        if callable(on_finish):
+            safe_call(on_finish, [results, end - start])
+        return results
 
     def select_region(self, render_range: RegionRange) -> Region:
         """
@@ -359,10 +437,41 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return Region(0, self.view.size())
 
 
+    def thread_execution(
+        self,
+        urls: List[str],
+        cwd: str,
+        on_data: Optional[OnData] = None,
+        on_error: Optional[OnError] = None,
+        timeout: Optional[float] = None
+    ) -> List[CachedImage]:
+        """
+        This method represents the processing sequence of a thread to be run
+        """
+        loaded_images = []
+        for url in urls:
+            resolved_url = resolve_local(url, cwd)
+            loaded_binary = None
+            cached_binary = ImageCache.get(resolved_url)
+            if type(cached_binary) is bytes:
+                loaded_binary = cached_binary
+                loaded_images.append(cached_image(url, resolved_url, len(loaded_binary)))
+            else:
+                loaded_binary = fetch_or_load_image(url, cwd, timeout)
+                loaded_images.append(cached_image(url, resolved_url, len(loaded_binary or '')))
+                if type(loaded_binary) is bytes:
+                    ImageCache.set(resolved_url, loaded_binary)
+            if loaded_binary is None and callable(on_error):
+                safe_call(on_error, [url])
+            elif callable(on_data):
+                safe_call(on_data, [loaded_binary])
+        return loaded_images
+
+
     def use_status_indicator(
         self, 
         region_range: RegionRange,
-        total_count: Union[int, None] = None,
+        total_count: Optional[int] = None,
         update_interval: int = 100,
     ) -> SublimeStatusIndicator:
         """

@@ -8,8 +8,9 @@ import uuid
 import re
 import logging
 
-from typing import Any, List
 from time import gmtime, strftime
+from inspect import signature
+from typing import Any, Callable, List, Tuple, Union
 from OrgExtended.orgutil.addmethod import *
 
 log = logging.getLogger(__name__)
@@ -311,6 +312,17 @@ def is_iterable(o: Any) -> bool:
         return False
 
 
+def safe_call(func: Callable, args: Union[Tuple, List] = ()) -> Any:
+    """
+    An utility function helps avoid `TypeError: it takes x positional 
+    argument but y were given`
+    """
+    if callable(func):
+        sig = signature(func)
+        return func(*args[:len(sig.parameters)])
+    return None
+
+
 def seconds_fmt(sec: int) -> str:
     """
     Convert seconds to readable format time
@@ -322,6 +334,13 @@ def seconds_fmt(sec: int) -> str:
     else:
         return '{}s'.format(sec)
     
+
+def shallow_flatten(array: List) -> List:
+    """
+    Flattens a list of lists one-level of depth.
+    """
+    return [x for y in array for x in y]
+
 
 def split_into_chunks(array: List, n: int) -> List:
     """
