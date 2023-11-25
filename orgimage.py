@@ -2,6 +2,9 @@ import re
 import traceback
 import sublime
 import sublime_plugin
+import urllib.parse
+import urllib.request
+from os import path
 from sublime import Region, View
 from typing import Callable, Dict, List, Set, Tuple, Union
 from OrgExtended.orgutil.sublime_utils import (
@@ -62,7 +65,42 @@ def extract_dimensions_from_attrs(
     return width, height
 
 
-def get_current_headline(point: Point, hregions: List[Region]) -> Region:
+def fetch_or_load_image(
+    url: str, 
+    cwd: str, 
+    timeout: Union[float, None] = None
+) -> Union[bytes, None]:
+    """
+    Remote fetch or load from local the image binary based on the 
+    matching case of provided url.
+
+    :param      url:      Accepts url or local file path
+    :param      timeout:  Timeout for HTTP requests (None by default).
+    """
+    try:
+        # Handle the case of the current working directory is a http/https url
+        if cwd.startswith('http:') or cwd.startswith('https:'):
+            relative_path = url
+            absolute_url = resolve_remote(relative_path, cwd)
+            response = urllib.request.urlopen(absolute_url)
+            return response.read()
+        # Handle the case of the provided url is already absolute
+        elif url.startswith('http:') or url.startswith('https'):
+            response = urllib.request.urlopen(url)
+            return response.read()
+        # Handle the case of the provided url is a local file path
+        else:
+            relative_path = url
+            absolute_path = resolve_local(relative_path, cwd)
+            with open(absolute_path, 'rb') as file:
+                return file.read()
+    except Exception as error:
+        print(error)
+        traceback.print_tb(error.__traceback__)
+        return None
+
+
+def find_current_headline(point: Point, hregions: List[Region]) -> Region:
     """
     Among many headings, find the heading that has the caret on it
     """
@@ -71,7 +109,7 @@ def get_current_headline(point: Point, hregions: List[Region]) -> Region:
             return region
 
 
-def get_headings_around_cursor(
+def find_headings_around_cursor(
     view: View, 
     sel: Region) -> Tuple[Region, Region]:
     """
@@ -86,12 +124,46 @@ def get_headings_around_cursor(
     cursor_on_heading = any(
         view.match_selector(begin, selector) for selector in LIST_HEADLINE_SELECTORS)
     if cursor_on_heading:
-        prev_ = get_current_headline(begin, regions)
+        prev_ = find_current_headline(begin, regions)
         next_ = slice_regions(regions, begin = prev_.end() + 1)[0]
     else:
         prev_ = slice_regions(regions, end = end)[-1]
         next_ = slice_regions(regions, begin = begin + 1)[0]
     return prev_, next_
+
+
+def resolve_local(url: str, cwd: str = '/') -> str:
+    """
+    Convert any case of local path to absolute path, skip remote url.
+    """
+    if not url.startswith('http:') and not url.startswith('https:'):
+        filepath = url
+        if url.startswith("file:"):
+            filepath = url.replace('file:', '')
+        if filepath.startswith('/'):
+            return filepath
+        if filepath.startswith('~'):
+            return path.expanduser(filepath)
+        else:
+            return path.abspath(path.join(cwd, filepath))
+    return url
+
+
+def resolve_remote(filepath: str, cwd: str = '') -> str:
+    """
+    Convert any case of remote url to absolute url. This function can be
+    used to convert relative links in remote .org file to absoluted links.    
+    From there we can load images for them.
+    """
+    if filepath.startswith('http:') or filepath.startswith('https:'):
+        return filepath
+    if cwd.startswith('http:') or cwd.startswith('https:'):
+        if filepath.startswith('file:'):
+            filepath = filepath.replace('file:', '')
+        if filepath.startswith('~'):
+            filepath = filepath[1:]
+        return urllib.parse.urljoin(cwd, filepath)
+    return ''
 
 
 def matching_context(view: View) -> bool:
@@ -129,7 +201,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 return self.handle_nothing_to_show(status_duration = 3)
             urls = self.collect_image_urls(image_regions)
             status = self.use_status_indicator(region_range, len(urls))
-            url_pools = split_into_chunks(urls, DEFAULT_POOL_SIZE)
+            pools = split_into_chunks(urls, DEFAULT_POOL_SIZE)
             
             view.set_read_only(True)
             view.set_status('read_only_mode', 'readonly')
@@ -176,7 +248,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         Should only call this method with a return statement when the 
         view has nothing to update
         
-        :param      delay:  Delay in second to clear the status message
+        :param      status_duration:  Delay in second to clear the status message
         """
         self.view.erase_status(STATUS_ID)
         self.view.set_status(STATUS_ID, 'Nothing to render.')
@@ -230,7 +302,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return dimension_changed_regions + phantomless_regions
 
 
-    def on_thread_finished(
+    def on_threads_finished(
         self,
         region: Region,
         status: SublimeStatusIndicator
@@ -282,7 +354,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         if render_range == 'folding':
             cursor_region = get_cursor_region(self.view)
-            prev, next = get_headings_around_cursor(self.view, cursor_region)
+            prev, next = find_headings_around_cursor(self.view, cursor_region)
             return region_between(self.view, prev, next)
         return Region(0, self.view.size())
 

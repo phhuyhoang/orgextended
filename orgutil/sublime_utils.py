@@ -139,7 +139,7 @@ class PhantomsManager:
     """
     Manage active phantoms in a view. There are two usage options: \n
     * Use the PhantomsManager.use() static method if you want each view
-    to be managed by just one instance
+    to be managed by just one instance of this class
     * Create a new PhantomsManager() instance if you want to manage them 
     by yourself. Each view can be managed by multiple instances.
     """
