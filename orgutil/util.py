@@ -8,7 +8,7 @@ import uuid
 import re
 import logging
 
-from typing import List
+from typing import Any, List
 from time import gmtime, strftime
 from OrgExtended.orgutil.addmethod import *
 
@@ -298,6 +298,17 @@ def compact(array: List) -> List:
     (`False`, `None`, `0`, `""`, `[]` and `{}`)
     """
     return list(filter(None, array))
+
+
+def is_iterable(o: Any) -> bool:
+    """
+    Return True if the given object is iterable
+    """
+    try:
+        iter(o)
+        return type(o) not in [str, bytes]
+    except Exception:
+        return False
 
 
 def seconds_fmt(sec: int) -> str:
