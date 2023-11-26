@@ -65,6 +65,15 @@ def is_active_plugin(plugin: str) -> bool:
     return plugin in installed_packages and plugin not in ignored_packages
 
 
+def lines_from_region(view: sublime.View, region: sublime.Region) -> List[str]:
+    """
+    :returns: A list of string lines (in sorted order) intersecting the 
+    provided `Region`
+    """
+    lines = view.lines(region)
+    return [view.substr(line) for line in lines]
+
+
 def region_between(
     view: sublime.View, 
     r1: sublime.Region, 
@@ -156,6 +165,23 @@ def starmap_async(
             safe_call(on_finish, [results])
     for arg in args:
         sublime.set_timeout(lambda a = arg: async_operation(a))
+
+
+def substring_region(
+    view: sublime.View, 
+    region: sublime.Region, 
+    child_substr: str) -> Optional[sublime.Region]:
+    """
+    Return calculated region of the `child_substr` if it is a substring of 
+    the `region`. Otherwise, return nothing
+    """
+    parent_substr = view.substr(region)
+    if child_substr not in parent_substr:
+        return None
+    index = parent_substr.index(child_substr)
+    begin = region.begin() + index
+    end = begin + len(child_substr)
+    return sublime.Region(begin, end)
 
 
 class PhantomsManager:

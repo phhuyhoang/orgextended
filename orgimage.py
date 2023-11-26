@@ -1,3 +1,29 @@
+"""
+     ┌─────┐                                    
+     │START│                                     
+     └──┬──┘                                    
+   _____▽______                                 
+  ╱            ╲    ┌──────┐                    
+ ╱ IMAGE BINARY ╲___│RENDER│                    
+ ╲ IN CACHE?    ╱yes└──────┘                    
+  ╲____________╱                                
+        │no                                     
+  ______▽______                                 
+ ╱             ╲    ┌──────────────┐            
+╱ CAN DOWNLOAD? ╲___│STORE TO CACHE│            
+╲               ╱yes└───────┬──────┘            
+ ╲_____________╱       _____▽______             
+        │no           ╱            ╲    ┌──────┐
+        │            ╱ IMAGE BINARY ╲___│RENDER│ 
+        │            ╲ IN CACHE?    ╱yes└──────┘
+        │             ╲____________╱            
+        │                   │no                 
+        └────┬──────────────┘                   
+          ┌──▽─┐                                
+          │STOP│                                
+          └────┘     
+"""
+
 import re
 import traceback
 import sublime
@@ -9,16 +35,26 @@ from timeit import default_timer
 from sublime import Region, View
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from OrgExtended.orgutil.cache import ConstrainedCache
+from OrgExtended.orgutil.image import (
+    Height, 
+    Width, 
+    image_format_of, 
+    image_size_of,
+    image_to_base64, 
+    image_to_string,
+)
 from OrgExtended.orgutil.sublime_utils import (
     PhantomsManager,
     SublimeStatusIndicator,
     find_by_selectors,
     find_by_selector_in_region,
-    get_cursor_region, 
+    get_cursor_region,
+    lines_from_region, 
     region_between, 
     show_message,
     slice_regions,
     starmap_async,
+    substring_region,
 )
 from OrgExtended.orgutil.threads import starmap_pools
 from OrgExtended.orgutil.typecompat import Literal, Point
@@ -31,9 +67,11 @@ ONE_SECOND = 1000
 ImageCache = ConstrainedCache.use('orgimage', max_size = 100 * 1024 * 1024) # 100 MB
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
+SELECTOR_ORG_LINK = 'orgmode.link'
 SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
 
 REGEX_ORG_ATTR = re.compile(r":(\w+)\s(\d+)")
+REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
 
 LIST_SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif"]
 LIST_HEADLINE_SELECTORS = [
@@ -132,8 +170,7 @@ def find_headings_around_cursor(
     view: View, 
     sel: Region) -> Tuple[Region, Region]:
     """
-    Create a region that includes two headlines are surrounding the cursor 
-    at any levels.
+    Find the region of two headlines surrounding the cursor at any level.
 
     :returns:   A tuple containing the region of the previous and next
                 headlines.
@@ -190,8 +227,6 @@ def matching_context(view: View) -> bool:
     Run this function on top of every run() method to filter out most 
     of unappropriate context (early return)
     """
-    if view.is_scratch():
-        return False
     if view.match_selector(0, SELECTOR_ORG_SOURCE):
         return False
     return True
@@ -199,7 +234,7 @@ def matching_context(view: View) -> bool:
 
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     """
-    Show images in the current .org file.
+    Show images in the current .org file. 
     Supports two options of render range:\n
     - 'folding': Loads and renders all images in the folding content. 
       (Default option)\n
@@ -229,7 +264,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             # Load images in a scratch buffer view (remote .org file) in
             # an other way
             if self.view.is_scratch():
-                pass
+                sublime.set_timeout_async(
+                    lambda: self.parallel_requests_using_threads(
+                        pools = pools,
+                        cwd = self.get_url_from_scratch(self.view),
+                        on_data = lambda: status.succeed(),
+                        on_error = lambda: status.failed(),
+                        on_finish = self.on_threads_finished(selected_region, status)))
             else:
                 sublime.set_timeout_async(
                     lambda: self.parallel_requests_using_threads(
@@ -239,7 +280,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         on_error = lambda: status.failed(),
                         on_finish = self.on_threads_finished(selected_region, status)))
 
-            # Incomplete
+            sublime.set_timeout(
+                lambda: status.is_running() and status.set('Slow internet! Be patient...'),
+                len(urls) * 5 * 1000) # Limiting 5s for each downloading image
         except Exception as error:
             show_message(error, level = 'error')
             traceback.print_tb(error.__traceback__)
@@ -266,6 +309,18 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         urls = map(lambda r: self.view.substr(r), regions)
         return set(urls)
+
+
+    def get_url_from_scratch(self, view: View) -> str:
+        """
+        A dumb way to get the url from a buffer that is opening a 
+        remote .org file
+        """
+        name = view.name()
+        if name.strip().startswith('[org-remote]'):
+            url = name.replace('[org-remote]', '').strip()
+            return url
+        return ''
 
 
     def handle_nothing_to_show(self, status_duration: int) -> None:
@@ -446,7 +501,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         timeout: Optional[float] = None
     ) -> List[CachedImage]:
         """
-        This method represents the processing sequence of a thread to be run
+        This method represents what a thread do
         """
         loaded_images = []
         for url in urls:
@@ -472,13 +527,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self, 
         region_range: RegionRange,
         total_count: Optional[int] = None,
-        update_interval: int = 100,
+        update_interval: Optional[int] = 100,
     ) -> SublimeStatusIndicator:
         """
         Setup a loading indicator on status bar
         """
         mode = 'inlineimages' if region_range == 'all' else 'unfold'
-        area = 'whole document' if region_range == 'all' else 'folding content'
+        area = 'current document' if region_range == 'all' else 'folding content'
         return SublimeStatusIndicator(self.view, STATUS_ID,
             message = '[{}] Fetching image in the {}...'.format(mode, area),
             finish_message = 'Done! Rendering the view...',
@@ -495,3 +550,144 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         substr = self.view.substr(region)
         width, height = extract_dimensions_from_attrs(substr)
         return width > 0 and height > 0
+
+
+class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
+    """
+    Render cached image to the view with the ideal size.
+    """
+    def run(
+        self, 
+        edit, 
+        region: Optional[Tuple[int, int]] = None,
+        images: Optional[List[CachedImage]] = [],
+    ):
+        try:
+            if not matching_context(self.view) or not region:
+                return None
+            region = Region(*region)
+            lines = lines_from_region(self.view, region)
+            viewport_width, _ = self.view.viewport_extent()
+            link_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK)
+            image_dict = self.to_resolved_url_dict(images)
+            original_urls = image_dict.keys()
+            prev_line = ''
+            for lr in link_regions:
+                substr = self.view.substr(lr)
+                line_region = self.view.line(lr)
+                line_text = self.view.substr(line_region)
+                for url, _description in re.findall(REGEX_ORG_LINK, substr):
+                    resolved_url = image_dict.get(url)
+                    image_binary = ImageCache.get(resolved_url)
+                    if not url in original_urls or not image_binary:
+                        continue
+                    url_region = substring_region(self.view, lr, url)
+                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
+                    width, height = self.fit_to_viewport(viewport_width, width, height)
+                    self.render_image(
+                        url_region,
+                        image_binary,
+                        width,
+                        height,
+                        len(line_text) - len(line_text.lstrip()),
+                        is_resized)
+                prev_line = line_text
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+
+
+    def extract_image_dimensions(
+        self,
+        attr_line: str,
+        image_binary: bytes) -> Tuple[int, int, bool]:
+        """
+        Extract image width, height from its binary.
+
+        :returns: A tuple containing width, height, and a boolean value 
+        indicating whether the image is resized using ORG_ATTR.
+        """
+        width, height = extract_dimensions_from_attrs(attr_line)
+        if width > 0 and height > 0:
+            return width, height, True
+        else:
+            b_width, b_height = image_size_of(image_binary)
+            if b_width is None: b_width = 0
+            if b_height is None: b_height = 0
+            if width > 0:
+                return width, b_height, True
+            elif height > 0:
+                return b_width, height, True
+            else:
+                return b_width, b_height, False
+
+
+    def fit_to_viewport(
+        self, 
+        vw: Union[int, float], 
+        width: int, 
+        height: int) -> Tuple[int, int]:
+        """
+        Adjust the image width to ensure it will not exceed the viewport.
+        Adjust the height to make it scale with width as well.
+        """
+        if width > vw:
+            temp = vw / width
+            height *= temp
+            width = vw
+        return width, height
+
+
+    def render_image(
+        self,
+        image_region: Region,
+        image_binary: bytes,
+        image_width: Width,
+        image_height: Height,
+        indent_level: int = 0, 
+        with_attr: bool = False) -> bool:
+        """
+        Render the image
+        """
+        try:
+            width, height = int(image_width), int(image_height)
+            image_format = image_format_of(image_binary)
+            space_indent = '&nbsp;' * (indent_level * 2)
+            pm = PhantomsManager.use(self.view)
+            if image_format == 'svg':
+                html = image_to_string(image_binary)
+            else:
+                base64 = image_to_base64(image_binary)
+                html = u'{}<img src="data:image/{}" class="centerImage" {}>'.format(
+                    space_indent,
+                    '{};base64,{}'.format(image_format, base64),
+                    'width="{}" height="{}"'.format(width, height),
+                )
+            if pm.has_phantom(image_region):
+                pid = pm.get_pid_by_region(image_region)
+                pm.erase_phantom(pid)
+            
+            pm.add_phantom(image_region, html, { 
+                'width': width, 
+                'height': height,
+                'with_attr': with_attr })
+            return True
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+            return False
+
+
+    def to_resolved_url_dict(self, images: List[CachedImage]) -> Dict[str, str]:
+        """
+        Converting a list of images into a dict that we can use the current 
+        relative link to quickly get the corresponding resolved absolute 
+        link.
+        """
+        resolved_url_dict = dict()
+        for image in images:
+            original_url = image.get('original_url')
+            if original_url is None:
+                continue
+            resolved_url_dict[original_url] = image.get('resolved_url')
+        return resolved_url_dict

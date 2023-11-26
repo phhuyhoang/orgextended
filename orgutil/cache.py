@@ -67,7 +67,7 @@ class ConstrainedCache:
         Return a boolean indicating whether the cache has a specified
         value corresponding to the given key
         """
-        return hasattr(self.cache, key) or bool(self.get(key))
+        return key in self.cache or bool(self.get(key))
 
     def set(self, key: str, value: Any) -> 'ConstrainedCache':
         """
