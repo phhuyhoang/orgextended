@@ -333,9 +333,9 @@ class PhantomsManager:
     @classmethod
     def is_being_managed(cls, view: sublime.View) -> bool:
         """
-        Check if a view is being centrally managed. Only returns `True` 
-        if `use()` has been used at least once for the view and has not 
-        been `remove()` before.
+        Check if a view is being managed. Only returns `True` if `use()` 
+        has been used at least once for the view and has not been 
+        `remove()`.
         """
         return view.id() in cls.hub
 
@@ -363,7 +363,6 @@ class PhantomsManager:
             return False
         del cls.hub[vid]
         return True
-        
 
 
 class SublimeStatusIndicator:

@@ -87,7 +87,8 @@ def plugin_unloaded():
 def onLoad(view):
     if(view and view.file_name() and util.isPotentialOrgFile(view.file_name())):
         folding.onLoad(view)
-        links.onLoad(view)
+        # links.onLoad(view)
+        # Has been replaced by org_extra_show_images.
 
 RE_TABLE_MATCH = re.compile(r"^\s*\|")
 # Core events to dispatch to each of our subsystems.

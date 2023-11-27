@@ -30,10 +30,13 @@ import sublime
 import sublime_plugin
 import urllib.parse
 import urllib.request
+import OrgExtended.orgdb as db
+import OrgExtended.asettings as settings
 from os import path
 from timeit import default_timer
 from sublime import Region, View
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from OrgExtended.orgparse.startup import Startup
 from OrgExtended.orgutil.cache import ConstrainedCache
 from OrgExtended.orgutil.image import (
     Height, 
@@ -88,10 +91,22 @@ LIST_HEADLINE_SELECTORS = [
 
 # Types
 RegionRange = Literal['folding', 'all']
+CachedImage = Dict[Literal['original_url', 'resolved_url', 'data_size'], Union[str, int]]
 OnData = Callable[['CachedImage'], None]
 OnError = Callable[[str], None]
 OnFinish = Callable[[List['CachedImage']], None]
-CachedImage = Dict[Literal['original_url', 'resolved_url', 'data_size'], Union[str, int]]
+StartupEnum = Literal[
+    "overview",
+    "content",
+    "showall",
+    "showeverything",
+    "fold",
+    "nofold",
+    "noinlineimages",
+    "inlineimages",
+    "logdone",
+    "lognotedone"
+]
 
 
 def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
@@ -101,6 +116,13 @@ def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
     cached on memory.
     """
     return { 'original_url': url, 'resolved_url': rurl, 'data_size': size }
+
+
+def startup(value: StartupEnum) -> StartupEnum:
+    """
+    Get a value from Startup enum in the manner of a bedridden old man
+    """
+    return Startup[value]
 
 
 def extract_dimensions_from_attrs(
@@ -232,9 +254,90 @@ def matching_context(view: View) -> bool:
     return True
 
 
+class OrgExtraImage(sublime_plugin.EventListener):
+    """
+    Event handlers
+    """
+    def on_activated(self, view: View) -> None:
+        """
+        Reworked the show images on startup feature with performance
+        optimization. It applies to the files opened from Goto Anything
+        as well.
+        Why not on_load?
+        1. It won't solve the Goto Anything case
+        2. Sometimes it would trigger the command twice
+        """
+        self.autoload(view)
+
+    def on_post_text_command(self, view: View, command: str, args: Dict) -> Any:
+        """
+        Catches the OrgTabCyclingCommand to add the behavior of 
+        automatically loading images when we unfold the content of 
+        a section.
+        """
+        if command != 'org_tab_cycling':
+            return None
+        lazyload_images = settings.Get('useLazyloadImages', False)
+        if not lazyload_images:
+            return None
+        current_status = view.get_status(STATUS_ID)
+        if '[inlineimages]' in current_status:
+            return None
+        if self.is_folding_section(view):
+            view.run_command('org_extra_show_images', { 'region_range': 'folding' })
+
+    def on_post_save(self, view: View) -> Any:
+        """
+        May re-render images when the ORG_ATTR values changed
+        """
+        if not matching_context(view):
+            return None
+        if not PhantomsManager.is_being_managed(view):
+            return 
+        view.run_command('org_extra_show_images', { 'region_range': 'folding' })
+
+    def on_pre_close(self, view: View) -> Any:
+        """
+        Should remove PM supervision before closing out the view to
+        avoid memory leaks.
+        """
+        PhantomsManager.remove(view)
+
+    def autoload(self, view: View) -> None:
+        """
+        Show all images on the view. This action should only be done once 
+        each time the file have opened.
+        """
+        if not matching_context(view):
+            return None
+        if not PhantomsManager.is_being_managed(view):
+            return None
+        try:
+            file = db.Get().FindInfo(view)
+            setting_startup = settings.Get('startup', ['showall'])
+            inbuffer_startup = file.org[0].startup(setting_startup)
+            if startup('inlineimages') in inbuffer_startup:
+                view.run_command('org_extra_show_images', { 'region_range': 'all' })
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+
+    def is_folding_section(self, view: View) -> bool:
+        """
+        Return True if the cursor is positioned at a headline and the 
+        content in that section headline is folding.
+        """
+        node = db.Get().AtInView(view)
+        if node and not node.is_root():
+            row, _col = view.curRowCol()
+            if node.start_row == row and not node.is_folded(view):
+                return True
+        return False
+
+
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     """
-    Show images in the current .org file. 
+    Non-blocking load and show images in the current .org file. 
     Supports two options of render range:\n
     - 'folding': Loads and renders all images in the folding content. 
       (Default option)\n
@@ -480,6 +583,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             safe_call(on_finish, [results, end - start])
         return results
 
+
     def select_region(self, render_range: RegionRange) -> Region:
         """
         Select the appropriate region based on the given range 
@@ -501,7 +605,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         timeout: Optional[float] = None
     ) -> List[CachedImage]:
         """
-        This method represents what a thread do
+        This method tells a thread what to do
         """
         loaded_images = []
         for url in urls:
