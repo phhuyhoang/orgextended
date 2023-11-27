@@ -1,5 +1,5 @@
 from sys import getsizeof
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 
 class ConstrainedCache:
@@ -106,7 +106,7 @@ class ConstrainedCache:
         return cls.hub.get(name) is not None
 
     @classmethod
-    def use(cls, name: str, max_size: Union[int, None]) -> 'ConstrainedCache':
+    def use(cls, name: str, max_size: Optional[int] = None) -> 'ConstrainedCache':
         """
         Create a newly instance with the corresponding name if there 
         aren't. Otherwise, return the caching store found.

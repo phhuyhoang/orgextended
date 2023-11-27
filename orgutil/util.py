@@ -342,6 +342,17 @@ def shallow_flatten(array: List) -> List:
     return [x for y in array for x in y]
 
 
+def sizeof_fmt(num, suffix="B"):
+    """
+    Convert bytes to readable format
+    """
+    for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
+        if abs(num) < 1024.0:
+            return "{:3.1f} {}{}".format(num, unit, suffix)
+        num /= 1024.0
+    return "{:.1f} Yi{}".format(num, suffix)
+
+
 def split_into_chunks(array: List, n: int) -> List:
     """
     Yield `n` number of sequential chunks from `array`.
