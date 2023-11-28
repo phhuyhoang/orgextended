@@ -21,6 +21,11 @@ except ImportError:
     Literal = _FakeLiteral()
 
 try:
+    from typing import TypedDict
+except ImportError:
+    from .mypy_extensions import TypedDict
+
+try:
     from sublime import Point
 except ImportError:
     Point = int
