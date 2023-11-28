@@ -293,6 +293,18 @@ def TEST(NAME,GOT,T,ERR):
         log.info(" [PASSED] " + NAME)
 
 
+def at(array: List, i: int = 0) -> Any:
+    """
+    Return the element at the given index of the list, or None if the
+    index is out of bounds.
+    """
+    try:
+        accessible = 0 <= i < len(array) or 0 >= i >= -len(array)
+        return array[i] if accessible else None
+    except:
+        return None
+
+
 def compact(array: List) -> List:
     """
     Creates an array with all falsey values removed

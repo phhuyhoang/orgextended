@@ -53,21 +53,22 @@ from OrgExtended.orgutil.sublime_utils import (
     find_by_selector_in_region,
     get_cursor_region,
     lines_from_region, 
-    region_between, 
+    region_between,
+    set_temporary_status, 
     show_message,
     slice_regions,
     starmap_async,
     substring_region,
 )
 from OrgExtended.orgutil.threads import starmap_pools
-from OrgExtended.orgutil.typecompat import Literal, Point
-from OrgExtended.orgutil.util import is_iterable, safe_call, shallow_flatten, split_into_chunks
+from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
+from OrgExtended.orgutil.util import at, is_iterable, safe_call, shallow_flatten, split_into_chunks
 
 STATUS_ID = 'orgextra_image'
 DEFAULT_POOL_SIZE = 10
 ONE_SECOND = 1000
 
-ImageCache = ConstrainedCache.use('orgimage', max_size = 100 * 1024 * 1024) # 100 MB
+ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
 SELECTOR_ORG_LINK = 'orgmode.link'
@@ -89,9 +90,10 @@ LIST_HEADLINE_SELECTORS = [
     'orgmode.headline9',
 ]
 
+
 # Types
 RegionRange = Literal['folding', 'all']
-CachedImage = Dict[Literal['original_url', 'resolved_url', 'data_size'], Union[str, int]]
+CachedImage = TypedDict('CachedImage', { 'original_url': str, 'resolved_url': str, 'data_size': Union[int, float] })
 OnData = Callable[['CachedImage'], None]
 OnError = Callable[[str], None]
 OnFinish = Callable[[List['CachedImage']], None]
@@ -197,17 +199,19 @@ def find_headings_around_cursor(
     :returns:   A tuple containing the region of the previous and next
                 headlines.
     """
-    begin, end = sel
+    begin, end = sel.to_tuple()
     regions = find_by_selectors(view, LIST_HEADLINE_SELECTORS)
     cursor_on_heading = any(
         view.match_selector(begin, selector) for selector in LIST_HEADLINE_SELECTORS)
     if cursor_on_heading:
         prev_ = find_current_headline(begin, regions)
-        next_ = slice_regions(regions, begin = prev_.end() + 1)[0]
+        next_ = slice_regions(regions, begin = prev_.end() + 1)
+        prev, next = prev_, at(next_, 0)
     else:
-        prev_ = slice_regions(regions, end = end)[-1]
-        next_ = slice_regions(regions, begin = begin + 1)[0]
-    return prev_, next_
+        prev_ = slice_regions(regions, end = end)
+        next_ = slice_regions(regions, begin = begin + 1)
+        prev, next = at(prev_, -1), at(next_, 0)
+    return prev, next
 
 
 def resolve_local(url: str, cwd: str = '/') -> str:
@@ -249,7 +253,7 @@ def matching_context(view: View) -> bool:
     Run this function on top of every run() method to filter out most 
     of unappropriate context (early return)
     """
-    if view.match_selector(0, SELECTOR_ORG_SOURCE):
+    if not view.match_selector(0, SELECTOR_ORG_SOURCE):
         return False
     return True
 
@@ -281,7 +285,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         if not lazyload_images:
             return None
         current_status = view.get_status(STATUS_ID)
-        if '[inlineimages]' in current_status:
+        if current_status:
             return None
         if self.is_folding_section(view):
             view.run_command('org_extra_show_images', { 'region_range': 'folding' })
@@ -310,12 +314,14 @@ class OrgExtraImage(sublime_plugin.EventListener):
         """
         if not matching_context(view):
             return None
-        if not PhantomsManager.is_being_managed(view):
+        # Stop if the current view already been rendered
+        if PhantomsManager.is_being_managed(view):
             return None
         try:
             file = db.Get().FindInfo(view)
             setting_startup = settings.Get('startup', ['showall'])
             inbuffer_startup = file.org[0].startup(setting_startup)
+            PhantomsManager.use(view)
             if startup('inlineimages') in inbuffer_startup:
                 view.run_command('org_extra_show_images', { 'region_range': 'all' })
         except Exception as error:
@@ -358,7 +364,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 return self.handle_nothing_to_show(status_duration = 3)
             urls = self.collect_image_urls(image_regions)
             status = self.use_status_indicator(region_range, len(urls))
-            pools = split_into_chunks(urls, DEFAULT_POOL_SIZE)
+            pools = split_into_chunks(list(urls), DEFAULT_POOL_SIZE)
             
             view.set_read_only(True)
             view.set_status('read_only_mode', 'readonly')
@@ -433,9 +439,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         
         :param      status_duration:  Delay in second to clear the status message
         """
-        self.view.erase_status(STATUS_ID)
-        self.view.set_status(STATUS_ID, 'Nothing to render.')
-        return sublime.set_timeout(lambda: self.view.erase_status(STATUS_ID), status_duration)
+        return set_temporary_status(self.view, STATUS_ID, 'Nothing to render.', status_duration)
 
 
     def ignore_rendered_regions(self, regions: List[Region]) -> List[Region]:
@@ -534,7 +538,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if is_iterable(ci):
                 cached_images.extend(ci)
                 if callable(on_finish):
-                    safe_call(on_finish, [cached_images, default_timer() - start])
+                    safe_call(on_finish, [shallow_flatten(cached_images), default_timer() - start])
 
         starmap_async(
             callback = lambda urls: self.thread_execution(
@@ -576,8 +580,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     cwd, 
                     on_data, 
                     on_error, 
-                    timeout)
-            ), pools)
+                    timeout),
+                pools
+            ))
         end = default_timer()
         if callable(on_finish):
             safe_call(on_finish, [results, end - start])
@@ -653,7 +658,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         substr = self.view.substr(region)
         width, height = extract_dimensions_from_attrs(substr)
-        return width > 0 and height > 0
+        return width > 0 or height > 0
 
 
 class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
@@ -675,17 +680,18 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             link_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK)
             image_dict = self.to_resolved_url_dict(images)
             original_urls = image_dict.keys()
-            prev_line = ''
             for lr in link_regions:
                 substr = self.view.substr(lr)
                 line_region = self.view.line(lr)
                 line_text = self.view.substr(line_region)
+                index = lines.index(line_text)
+                prev_line = lines[index - 1] if index > 0 else None
                 for url, _description in re.findall(REGEX_ORG_LINK, substr):
                     resolved_url = image_dict.get(url)
                     image_binary = ImageCache.get(resolved_url)
                     if not url in original_urls or not image_binary:
                         continue
-                    url_region = substring_region(self.view, lr, url)
+                    url_region = substring_region(self.view, lr, url)                    
                     width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
                     width, height = self.fit_to_viewport(viewport_width, width, height)
                     self.render_image(
@@ -695,7 +701,6 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                         height,
                         len(line_text) - len(line_text.lstrip()),
                         is_resized)
-                prev_line = line_text
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
@@ -719,9 +724,9 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             if b_width is None: b_width = 0
             if b_height is None: b_height = 0
             if width > 0:
-                return width, b_height, True
+                return width, (width * b_height / b_width), True
             elif height > 0:
-                return b_width, height, True
+                return (height * b_width / b_height), height, True
             else:
                 return b_width, b_height, False
 

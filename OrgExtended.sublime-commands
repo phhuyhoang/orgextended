@@ -220,14 +220,14 @@
         "caption": "Org Extra: Debug Images Cache",
         "command": "org_extra_debug_cache",
         "args": {
-            "target": "orgimage"
+            "target": "image"
         }
     },
     {
         "caption": "Org Extra: Clear Images Cache",
         "command": "org_extra_clear_cache",
         "args": {
-            "target": "orgimage"
+            "target": "image"
         }
     }
 ]

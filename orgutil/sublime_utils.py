@@ -436,7 +436,9 @@ class SublimeStatusIndicator:
                 self.finish_message,
                 seconds_fmt(duration)
             )
+        self._stopped = True
         self.view.set_status(self.name, status_message)
+        sublime.set_timeout(lambda: self.clear(), 3000)
 
     def set(
         self,
@@ -452,6 +454,12 @@ class SublimeStatusIndicator:
         self.update_interval = update_interval or self.update_interval
         return self
 
+    def clear(self) -> 'SublimeStatusIndicator':
+        """
+        Clear the status message
+        """
+        self.view.erase_status(self.name)
+
     def succeed(self) -> 'SublimeStatusIndicator':
         """
         Tells the indicator that a unit of work has been succeed.
@@ -466,11 +474,11 @@ class SublimeStatusIndicator:
         self._counter.failed += 1
         return self
 
-    def autoupdate(self, _id: str, i: int = 0, move: int = 1) -> None:
+    def autoupdate(self, i: int = 0, move: int = 1) -> None:
         """
         Automatically update the status message in period.
         """
-        if self._stopped or _id != self._id:
+        if self._stopped:
             return None
         before = i % 8
         after = (7) - before
@@ -495,7 +503,7 @@ class SublimeStatusIndicator:
                 ' ' * after,
                 self.message)
         self.view.set_status(self.name, status_message)
-        sublime.set_timeout(lambda: self.autoupdate(self._id, i, move), self.update_interval)
+        sublime.set_timeout(lambda: self.autoupdate(i, move), self.update_interval)
 
     @staticmethod
     def status_counter():

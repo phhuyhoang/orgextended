@@ -25,7 +25,7 @@ class OrgExtraClearCacheCommand(sublime_plugin.WindowCommand):
             )
         )
         cache.autofreeup(True)
-        sublime.set_timeout(lambda: self.window.status_message(''))
+        sublime.set_timeout(lambda: self.window.status_message(''), 5000)
 
 
 class OrgExtraDebugCacheCommand(sublime_plugin.WindowCommand):
