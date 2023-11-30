@@ -363,10 +363,14 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             
             selected_region = self.select_region(region_range)
             image_regions = self.collect_image_regions(selected_region)
-            image_regions = self.ignore_rendered_regions(image_regions)
+            dimension_changed, phantomless = self.ignore_rendered_regions(image_regions)
+            image_regions = dimension_changed + phantomless
 
             if not image_regions:
                 return self.handle_nothing_to_show(status_duration = 3)
+            if len(phantomless):
+                self.create_placeholder_phantoms(phantomless)
+
             urls = self.collect_image_urls(image_regions)
             status = self.use_status_indicator(region_range, len(urls))
             pools = split_into_chunks(list(urls), DEFAULT_POOL_SIZE)
@@ -416,6 +420,20 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return image_regions
 
 
+    def create_placeholder_phantoms(self, regions: Region) -> None:
+        """
+        Should pre-create phantoms to tracking the regions for in-time 
+        rendering instead of after all. It enhances the user experience 
+        and allows for file editing while waiting for images to load.
+        """
+        pm = PhantomsManager.use(self.view)
+        for image_region in regions:
+            if pm.has_phantom(image_region):
+                pid = pm.get_pid_by_region(image_region)
+                pm.erase_phantom(pid)
+            pm.add_phantom(image_region, '')
+
+
     def collect_image_urls(self, regions: List[Region]) -> Set[str]:
         """
         Collect urls as string from their regions (with duplicate 
@@ -447,7 +465,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return set_temporary_status(self.view, STATUS_ID, 'Nothing to render.', status_duration)
 
 
-    def ignore_rendered_regions(self, regions: List[Region]) -> List[Region]:
+    def ignore_rendered_regions(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
         """
         Filter out the regions that have been rendered by checking their
         existence on PhantomsManager.
@@ -489,9 +507,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 if width != last_data.get('width') or height != last_data.get('height'):
                     dimension_changed_regions.append(region)
 
-        # The ones has dimension changed should be prioritized to render
-        # first.
-        return dimension_changed_regions + phantomless_regions
+        return dimension_changed_regions, phantomless_regions
 
 
     def on_threads_finished(
