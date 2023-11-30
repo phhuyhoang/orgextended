@@ -134,16 +134,21 @@ def extract_dimensions_from_attrs(
     """
     Extract width and height from the #+ORG_ATTR line above a link.
     """
-    attributes = re.findall(REGEX_ORG_ATTR, textline)
-    width, height = default_width, default_height
-    if textline.strip().startswith('#+ORG_ATTR:') and len(attributes) > 0:
-        for attribute in attributes:
-            key, value = attribute
-            if key == 'width':
-                width = int(value)
-            elif key == 'height':
-                height = int(value)
-    return width, height
+    try:
+        attributes = re.findall(REGEX_ORG_ATTR, textline)
+        width, height = default_width, default_height
+        if textline.strip().startswith('#+ORG_ATTR:') and len(attributes) > 0:
+            for attribute in attributes:
+                key, value = attribute
+                if key == 'width':
+                    width = int(value)
+                elif key == 'height':
+                    height = int(value)
+        return width, height
+    except Exception as error:
+        print(error)
+        traceback.print_tb(error.__traceback__)
+        return default_width, default_height
 
 
 def fetch_or_load_image(

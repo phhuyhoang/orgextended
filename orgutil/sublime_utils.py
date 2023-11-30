@@ -164,7 +164,7 @@ def starmap_async(
         if len(results) >= len(args):
             safe_call(on_finish, [results])
     for arg in args:
-        sublime.set_timeout(lambda a = arg: async_operation(a))
+        sublime.set_timeout_async(lambda a = arg: async_operation(a))
 
 
 def substring_region(
