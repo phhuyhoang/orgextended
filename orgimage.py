@@ -303,6 +303,9 @@ class OrgExtraImage(sublime_plugin.EventListener):
             return None
         if not PhantomsManager.is_being_managed(view):
             return 
+        current_status = view.get_status(STATUS_ID)
+        if current_status:
+            return None
         view.run_command('org_extra_show_images', { 'region_range': 'folding' })
 
     def on_pre_close(self, view: View) -> Any:
