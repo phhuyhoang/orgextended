@@ -399,4 +399,8 @@
     // Load images when unfolding a headline. If you turn it off, 
     // images will not display unless #+STARTUP: inlineimages is set.
     "extra.image.useLazyload": true,
+    // Enabling this option will force the image to render as soon as 
+    // it's downloaded. It may slow down and interrupt your editing 
+    // if you are working on a large file
+    "extra.image.instantRender": false,
 }

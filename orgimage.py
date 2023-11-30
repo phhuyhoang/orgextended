@@ -387,7 +387,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     lambda: self.parallel_requests_using_threads(
                         pools = pools,
                         cwd = self.get_url_from_scratch(self.view),
-                        on_data = lambda: status.succeed(),
+                        on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
                         on_error = lambda: status.failed(),
                         on_finish = self.on_threads_finished(selected_region, status)))
             else:
@@ -395,7 +395,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     lambda: self.parallel_requests_using_threads(
                         pools = pools,
                         cwd = path.dirname(self.view.file_name() or ''),
-                        on_data = lambda: status.succeed(),
+                        on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
                         on_error = lambda: status.failed(),
                         on_finish = self.on_threads_finished(selected_region, status)))
 
@@ -511,6 +511,26 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return dimension_changed_regions, phantomless_regions
 
 
+    def on_downloaded(
+        self,
+        region: Region,
+        then: Optional[OnData] = None) -> OnData:
+        """
+        Implement the instant render option.
+        """
+        def on_data(cached_image: CachedImage):
+            instant_render_enabled = settings.Get('extra.image.instantRender', False)
+            if instant_render_enabled:
+                self.view.run_command('org_extra_render_images', 
+                    args = {
+                        'region': region.to_tuple(),
+                        'images': [cached_image],
+                    }
+                )
+            if callable(then): safe_call(then, [cached_image])
+        return on_data
+
+
     def on_threads_finished(
         self,
         region: Region,
@@ -521,12 +541,14 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
             status.stop(timecost)
-            self.view.run_command('org_extra_render_images', 
-                args = {
-                    'region': region.to_tuple(),
-                    'images': cached_images,
-                }
-            )
+            instant_render_enabled = settings.Get('extra.image.instantRender', False)
+            if not instant_render_enabled:
+                self.view.run_command('org_extra_render_images', 
+                    args = {
+                        'region': region.to_tuple(),
+                        'images': cached_images,
+                    }
+                )
         return on_finish
 
 
