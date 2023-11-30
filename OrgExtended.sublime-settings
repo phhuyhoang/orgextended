@@ -398,5 +398,5 @@
     // 
     // Load images when unfolding a headline. If you turn it off, 
     // images will not display unless #+STARTUP: inlineimages is set.
-    "useLazyloadImages": true,
+    "extra.image.useLazyload": true,
 }

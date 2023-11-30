@@ -286,7 +286,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         """
         if command != 'org_tab_cycling':
             return None
-        lazyload_images = settings.Get('useLazyloadImages', False)
+        lazyload_images = settings.Get('extra.image.useLazyload', False)
         if not lazyload_images:
             return None
         current_status = view.get_status(STATUS_ID)
