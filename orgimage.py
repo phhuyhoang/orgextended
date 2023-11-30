@@ -375,8 +375,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             status = self.use_status_indicator(region_range, len(urls))
             pools = split_into_chunks(list(urls), DEFAULT_POOL_SIZE)
             
-            view.set_read_only(True)
-            view.set_status('read_only_mode', 'readonly')
             status.start()
             
             # Load images in a scratch buffer view (remote .org file) in
@@ -520,8 +518,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
             status.stop(timecost)
-            self.view.set_read_only(False)
-            self.view.set_status('read_only_mode', 'writeable')
             self.view.run_command('org_extra_render_images', 
                 args = {
                     'region': region.to_tuple(),
@@ -640,16 +636,18 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             cached_binary = ImageCache.get(resolved_url)
             if type(cached_binary) is bytes:
                 loaded_binary = cached_binary
-                loaded_images.append(cached_image(url, resolved_url, len(loaded_binary)))
+                loaded_image = cached_image(url, resolved_url, len(loaded_binary))
+                loaded_images.append(loaded_image)
             else:
                 loaded_binary = fetch_or_load_image(url, cwd, timeout)
-                loaded_images.append(cached_image(url, resolved_url, len(loaded_binary or '')))
+                loaded_image = cached_image(url, resolved_url, len(loaded_binary or ''))
+                loaded_images.append(loaded_image)
                 if type(loaded_binary) is bytes:
                     ImageCache.set(resolved_url, loaded_binary)
             if loaded_binary is None and callable(on_error):
                 safe_call(on_error, [url])
             elif callable(on_data):
-                safe_call(on_data, [loaded_binary])
+                safe_call(on_data, [loaded_image])
         return loaded_images
 
 
