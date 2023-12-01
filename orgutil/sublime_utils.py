@@ -138,7 +138,7 @@ def slice_regions(
     if type(aregion) is sublime.Region:
         begin, end = aregion.begin(), aregion.end()
     for region in regions:
-        if region.begin() >= begin and region.end() < end:
+        if region.begin() >= begin and region.end() <= end:
             sliced_regions.append(region)
     sliced_regions.sort()
     return sliced_regions
