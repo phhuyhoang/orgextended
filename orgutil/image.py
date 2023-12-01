@@ -1,11 +1,11 @@
 import base64
-import imghdr
 import struct
 import traceback
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Optional, Tuple
 
+from . import imghdr_py3 as imghdr
 from .typecompat import Literal
 
 
@@ -17,6 +17,12 @@ ImageFormat = Literal['svg', 'png', 'gif', 'jpeg']
 def image_format_of(image: bytes) -> ImageFormat:
     """
     Find the image format directly from its bytes.
+    
+    Notice: Built-in imghdr for Python 3.3 sometimes sucks at detecting 
+    JPEG image format. So I replaced it with this one:
+    https://bugs.python.org/file45325
+
+    Topic: https://bugs.python.org/issue28591
     """
     binary = image
     head = binary[:24]
