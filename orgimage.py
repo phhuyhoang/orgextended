@@ -92,11 +92,12 @@ LIST_HEADLINE_SELECTORS = [
 
 
 # Types
-RegionRange = Literal['folding', 'all']
+Action = Literal['open', 'save', 'unfold', 'unknown']
 CachedImage = TypedDict('CachedImage', { 'original_url': str, 'resolved_url': str, 'data_size': Union[int, float] })
 OnData = Callable[['CachedImage'], None]
 OnError = Callable[[str], None]
 OnFinish = Callable[[List['CachedImage']], None]
+RegionRange = Literal['folding', 'all', 'pre-section', 'auto']
 StartupEnum = Literal[
     "overview",
     "content",
@@ -125,6 +126,20 @@ def startup(value: StartupEnum) -> StartupEnum:
     Get a value from Startup enum in the manner of a bedridden old man
     """
     return Startup[value]
+
+
+def detect_region_range(view: View) -> RegionRange:
+    """
+    Detect current region range relies on the headings around the 
+    cursor
+    """
+    prev_, next_ = find_headings_around_cursor(view, view.sel()[0])
+    if not prev_ and not next_:
+        return 'all'
+    elif prev_:
+        return 'folding'
+    else:
+        return 'pre-section'
 
 
 def extract_dimensions_from_attrs(
@@ -357,13 +372,19 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
       (Default option)\n
     - 'all': Loads and renders all images in the whole document.
       (Auto-applied this option on the file that use #+STARTUP: inlineimages)
+    - 'pre-section': Applies to the region preceding the first heading 
+      in the document.
+    - 'auto': Auto detection.
     """
-    def run(self, edit, region_range = 'folding'):
+    def run(self, edit, region_range: RegionRange = 'folding'):
         view = self.view
         try:
             if not matching_context(view):
                 return None
             
+            if region_range == 'auto':
+                region_range = detect_region_range(view)
+
             selected_region = self.select_region(region_range)
             image_regions = self.collect_image_regions(selected_region)
             dimension_changed, phantomless = self.ignore_rendered_regions(image_regions)
@@ -487,8 +508,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
             current_line = self.view.line(region)
             index = lines.index(current_line)
-            if index <= 0:
-                return False
+            if index < 0:
+                return dimension_changed_regions, phantomless_regions
             last_pid = pm.get_pid_by_region(region)
             last_data = pm.get_data_by_pid(last_pid) or {}
             upper_line_region = lines[index - 1]
@@ -636,10 +657,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         Select the appropriate region based on the given range 
         (folding or all)
         """
+        if render_range == 'pre-section':
+            prev_, next_ = find_headings_around_cursor(self.view, Region(0, 0))
+            return self.select_region('all') if not next_ else region_between(self.view, Region(0, 0), next_)
         if render_range == 'folding':
             cursor_region = get_cursor_region(self.view)
-            prev, next = find_headings_around_cursor(self.view, cursor_region)
-            return region_between(self.view, prev, next)
+            prev_, next_ = find_headings_around_cursor(self.view, cursor_region)
+            return region_between(self.view, prev_, next_)
         return Region(0, self.view.size())
 
 
