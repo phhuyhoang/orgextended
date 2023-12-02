@@ -35,6 +35,7 @@ import OrgExtended.asettings as settings
 from os import path
 from timeit import default_timer
 from sublime import Region, View
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from OrgExtended.orgparse.startup import Startup
 from OrgExtended.orgutil.cache import ConstrainedCache
@@ -64,20 +65,27 @@ from OrgExtended.orgutil.threads import starmap_pools
 from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
 from OrgExtended.orgutil.util import at, is_iterable, safe_call, shallow_flatten, split_into_chunks
 
-STATUS_ID = 'orgextra_image'
 DEFAULT_POOL_SIZE = 10
 ONE_SECOND = 1000
+STATUS_ID = 'orgextra_image'
 
 ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
+
+COMMAND_RENDER_IMAGES = 'org_extra_render_images'
+COMMAND_SHOW_IMAGES = 'org_extra_show_images'
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
 SELECTOR_ORG_LINK = 'orgmode.link'
 SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
 
+SETTING_INSTANT_RENDER = 'extra.image.instantRender'
+SETTING_USE_LAZYLOAD = 'extra.image.useLazyload'
+
 REGEX_ORG_ATTR = re.compile(r":(\w+)\s(\d+)")
 REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
 
 LIST_SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif"]
+LIST_OUTSIDE_SECTION_REGION_RANGES = ['all', 'pre-section']
 LIST_HEADLINE_SELECTORS = [
     'orgmode.headline',
     'orgmode.headline2',
@@ -212,14 +220,14 @@ def find_current_headline(point: Point, hregions: List[Region]) -> Region:
 
 def find_headings_around_cursor(
     view: View, 
-    sel: Region) -> Tuple[Region, Region]:
+    cursor: Region) -> Tuple[Optional[Region], Optional[Region]]:
     """
     Find the region of two headlines surrounding the cursor at any level.
 
     :returns:   A tuple containing the region of the previous and next
                 headlines.
     """
-    begin, end = sel.to_tuple()
+    begin, end = cursor.to_tuple()
     regions = find_by_selectors(view, LIST_HEADLINE_SELECTORS)
     cursor_on_heading = any(
         view.match_selector(begin, selector) for selector in LIST_HEADLINE_SELECTORS)
@@ -282,6 +290,11 @@ class OrgExtraImage(sublime_plugin.EventListener):
     """
     Event handlers
     """
+    INIT_KEY = 'initialized'
+    LAST_ACTION_KEY = 'last_action'
+
+    hub = defaultdict(dict)
+
     def on_activated(self, view: View) -> None:
         """
         Reworked the show images on startup feature with performance
@@ -291,7 +304,9 @@ class OrgExtraImage(sublime_plugin.EventListener):
         1. It won't solve the Goto Anything case
         2. Sometimes it would trigger the command twice
         """
+        self.initialize(view, 'open')
         self.autoload(view)
+
 
     def on_post_text_command(self, view: View, command: str, args: Dict) -> Any:
         """
@@ -301,14 +316,16 @@ class OrgExtraImage(sublime_plugin.EventListener):
         """
         if command != 'org_tab_cycling':
             return None
-        lazyload_images = settings.Get('extra.image.useLazyload', False)
+        lazyload_images = settings.Get(SETTING_USE_LAZYLOAD, False)
         if not lazyload_images:
             return None
         current_status = view.get_status(STATUS_ID)
         if current_status:
             return None
         if self.is_folding_section(view):
-            view.run_command('org_extra_show_images', { 'region_range': 'folding' })
+            view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'folding' })
+            self.update_action(view, 'unfold')
+
 
     def on_post_save(self, view: View) -> Any:
         """
@@ -317,11 +334,22 @@ class OrgExtraImage(sublime_plugin.EventListener):
         if not matching_context(view):
             return None
         if not PhantomsManager.is_being_managed(view):
-            return 
-        current_status = view.get_status(STATUS_ID)
-        if current_status:
             return None
-        view.run_command('org_extra_show_images', { 'region_range': 'folding' })
+        file = db.Get().FindInfo(view)
+        setting_startup = settings.Get('startup', ['showall'])
+        inbuffer_startup = file.org[0].startup(setting_startup)
+        prohibit_range = LIST_OUTSIDE_SECTION_REGION_RANGES
+        region_range = detect_region_range(view)
+        # We should not render things outside the folding section if the 
+        # STARTUP: inlineimages is not set, unless you unfolded something
+        if region_range in prohibit_range and startup('inlineimages') not in inbuffer_startup:
+            return None
+        current_status = view.get_status(STATUS_ID)
+        # If the last action is save, that's ok to render the image again
+        if not current_status or self.last_action(view) == 'save':
+            view.run_command('org_extra_show_images', { 'region_range': 'auto' })
+            self.performed_action(view, 'save')
+
 
     def on_pre_close(self, view: View) -> Any:
         """
@@ -329,6 +357,24 @@ class OrgExtraImage(sublime_plugin.EventListener):
         avoid memory leaks.
         """
         PhantomsManager.remove(view)
+        self.selfdestruct(view)
+
+
+    @classmethod
+    def initialize(cls, view: View, default_action: Action = 'open') -> Any:
+        """
+        Define some initial properties when a file open
+        """
+        if not matching_context(view):
+            return None
+
+        vid = view.id()
+        if cls.INIT_KEY in cls.hub[vid]:
+            return None
+
+        cls.hub[vid][cls.LAST_ACTION_KEY] = default_action
+        cls.hub[vid][cls.INIT_KEY] = True
+
 
     def autoload(self, view: View) -> None:
         """
@@ -351,6 +397,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
             print(error)
             traceback.print_tb(error.__traceback__)
 
+
     def is_folding_section(self, view: View) -> bool:
         """
         Return True if the cursor is positioned at a headline and the 
@@ -362,6 +409,34 @@ class OrgExtraImage(sublime_plugin.EventListener):
             if node.start_row == row and not node.is_folded(view):
                 return True
         return False
+
+
+    @classmethod
+    def selfdestruct(cls, view: View) -> None:
+        """
+        Delete defined properties
+        """
+        del cls.hub[view.id()]
+
+
+    @classmethod
+    def last_action(cls, view: View) -> Action:
+        """
+        Latest known action. 
+        """
+        vid = view.id()
+        if vid not in cls.hub:
+            return 'unknown'
+        return cls.hub[vid].get(cls.LAST_ACTION_KEY, 'unknown')
+
+
+    @classmethod
+    def performed_action(cls, view: View, action: Action) -> 'OrgExtraImage':
+        """
+        Sets the last action.
+        """
+        vid = view.id()
+        cls.hub[vid][cls.LAST_ACTION_KEY] = action
 
 
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
@@ -540,9 +615,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         Implement the instant render option.
         """
         def on_data(cached_image: CachedImage):
-            instant_render_enabled = settings.Get('extra.image.instantRender', False)
+            instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
             if instant_render_enabled:
-                self.view.run_command('org_extra_render_images', 
+                self.view.run_command(COMMAND_RENDER_IMAGES, 
                     args = {
                         'region': region.to_tuple(),
                         'images': [cached_image],
@@ -562,9 +637,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
             status.stop(timecost)
-            instant_render_enabled = settings.Get('extra.image.instantRender', False)
+            instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
             if not instant_render_enabled:
-                self.view.run_command('org_extra_render_images', 
+                self.view.run_command(COMMAND_RENDER_IMAGES, 
                     args = {
                         'region': region.to_tuple(),
                         'images': cached_images,
@@ -676,7 +751,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         timeout: Optional[float] = None
     ) -> List[CachedImage]:
         """
-        This method tells a thread what to do
+        This method specifies what a thread will have to perform.
+        It's typically revolves around ensuring that the images have 
+        been cached and are ready for rendering.
         """
         loaded_images = []
         for url in urls:
