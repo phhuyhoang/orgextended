@@ -306,11 +306,6 @@ class OrgExtraImage(sublime_plugin.EventListener):
     """
     Event handlers
     """
-    INIT_KEY = 'initialized'
-    LAST_ACTION_KEY = 'last_action'
-
-    hub = defaultdict(dict)
-
     def on_activated(self, view: View) -> None:
         """
         Reworked the show images on startup feature with performance
@@ -363,17 +358,22 @@ class OrgExtraImage(sublime_plugin.EventListener):
         current_status = view.get_status(STATUS_ID)
         # If the last action is save, that's ok to render the image again
         if not current_status or self.last_action(view) == 'save':
-            view.run_command('org_extra_show_images', { 'region_range': 'auto' })
-            self.performed_action(view, 'save')
+            view.run_command(COMMAND_SHOW_IMAGES, 
+                args = { 
+                    'region_range': 'auto', 
+                    'no_download': True, 
+                }
+            )
+            self.update_action(view, 'save')
 
 
-    def on_pre_close(self, view: View) -> Any:
+    def on_pre_close(self, view: sublime.View):
         """
-        Should remove PM supervision before closing out the view to
+        Should remove relevant data before closing out the view to
         avoid memory leaks.
         """
         PhantomsManager.remove(view)
-        self.selfdestruct(view)
+        ContextData.remove(view)
 
 
     @classmethod
@@ -384,18 +384,18 @@ class OrgExtraImage(sublime_plugin.EventListener):
         if not matching_context(view):
             return None
 
-        vid = view.id()
-        if cls.INIT_KEY in cls.hub[vid]:
+        view_state = context_data(view)
+        if view_state.get('initialized') == True:
             return None
 
-        cls.hub[vid][cls.LAST_ACTION_KEY] = default_action
-        cls.hub[vid][cls.INIT_KEY] = True
+        view_state['last_action'] = default_action
+        view_state['initialized'] = True
 
 
     def autoload(self, view: View) -> None:
         """
         Show all images on the view. This action should only be done once 
-        each time the file have opened.
+        each time the file have opened with the inlineimages startup.
         """
         if not matching_context(view):
             return None
@@ -408,7 +408,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
             inbuffer_startup = file.org[0].startup(setting_startup)
             PhantomsManager.use(view)
             if startup('inlineimages') in inbuffer_startup:
-                view.run_command('org_extra_show_images', { 'region_range': 'all' })
+                view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'all' })
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
@@ -427,32 +427,22 @@ class OrgExtraImage(sublime_plugin.EventListener):
         return False
 
 
-    @classmethod
-    def selfdestruct(cls, view: View) -> None:
+    @staticmethod
+    def last_action(view: View) -> Action:
         """
-        Delete defined properties
+        Latest action. 
         """
-        del cls.hub[view.id()]
+        view_state = context_data(view)
+        return view_state['last_action']
 
 
-    @classmethod
-    def last_action(cls, view: View) -> Action:
-        """
-        Latest known action. 
-        """
-        vid = view.id()
-        if vid not in cls.hub:
-            return 'unknown'
-        return cls.hub[vid].get(cls.LAST_ACTION_KEY, 'unknown')
-
-
-    @classmethod
-    def performed_action(cls, view: View, action: Action) -> 'OrgExtraImage':
+    @staticmethod
+    def update_action(view: View, action: Action) -> 'OrgExtraImage':
         """
         Sets the last action.
         """
-        vid = view.id()
-        cls.hub[vid][cls.LAST_ACTION_KEY] = action
+        view_state = context_data(view)
+        view_state['last_action'] = action
 
 
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
