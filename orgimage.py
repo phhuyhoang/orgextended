@@ -467,7 +467,12 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
       in the document.
     - 'auto': Auto detection.
     """
-    def run(self, edit, region_range: RegionRange = 'folding'):
+    def run(
+        self, 
+        edit, 
+        region_range: RegionRange = 'folding',
+        no_download: bool = False,
+    ):
         view = self.view
         try:
             if not matching_context(view):
@@ -487,6 +492,16 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 self.create_placeholder_phantoms(phantomless)
 
             urls = self.collect_image_urls(image_regions)
+
+            if no_download:
+                return self.handle_rendering_without_download(
+                    region = selected_region,
+                    urls = urls,
+                    cwd = self.get_url_from_scratch(self.view) \
+                        if self.view.is_scratch() \
+                        else path.dirname(self.view.file_name() or ''),
+                )
+
             status = self.use_status_indicator(region_range, len(urls))
             pools = split_into_chunks(list(urls), DEFAULT_POOL_SIZE)
             
@@ -576,6 +591,36 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         :param      status_duration:  Delay in second to clear the status message
         """
         return set_temporary_status(self.view, STATUS_ID, 'Nothing to render.', status_duration)
+
+
+    def handle_rendering_without_download(
+        self, 
+        region: Region,
+        urls: List[str], 
+        cwd: str
+    ) -> None:
+        """
+        When this method is called, nothing new will be cached, so the 
+        render command may reuse what has already been cached.
+        """
+        tuple_region = region.to_tuple()
+        images = map(lambda url: cached_image(url, resolve_local(url, cwd)), urls)
+        instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
+        if not instant_render_enabled:
+            return self.view.run_command(COMMAND_RENDER_IMAGES,
+                args = {
+                    'region': tuple_region,
+                    'images': images
+                }
+            )
+        else:
+            for image in images:
+                self.view.run_command(COMMAND_RENDER_IMAGES,
+                    args = {
+                        'region': tuple_region,
+                        'images': [image]
+                    }
+                )
 
 
     def ignore_rendered_regions(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
