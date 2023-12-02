@@ -4,7 +4,9 @@ Sublime Text utility functions
 
 import uuid
 import sublime
+import sublime_plugin
 from math import ceil
+from collections import defaultdict
 from timeit import default_timer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -535,3 +537,30 @@ class SublimeStatusIndicator:
             before = 0
             after = 0
         return IndicatorBar()
+
+
+class ContextData(object):
+    """
+    The missing Sublime Text view.set_data() and view.get_data()
+    """
+    hub = dict()
+
+    @classmethod
+    def available_for(cls, view: sublime.View) -> bool:
+        vid = view.id()
+        return vid in cls.hub
+
+    @classmethod
+    def use(cls, view: sublime.View, default: Any = {}) -> Any:
+        vid = view.id()
+        if not cls.available_for(view):
+            cls.hub[vid] = default
+        return cls.hub[vid]
+
+    @classmethod
+    def remove(cls, view: sublime.View) -> bool:
+        vid = view.id()
+        if not cls.available_for(view):
+            return False
+        del cls.hub[vid]
+        return True

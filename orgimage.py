@@ -48,6 +48,7 @@ from OrgExtended.orgutil.image import (
     image_to_string,
 )
 from OrgExtended.orgutil.sublime_utils import (
+    ContextData,
     PhantomsManager,
     SublimeStatusIndicator,
     find_by_selectors,
@@ -118,6 +119,13 @@ StartupEnum = Literal[
     "logdone",
     "lognotedone"
 ]
+ViewState = TypedDict(
+    'ViewState', 
+    { 
+        'initialized': bool, 
+        'last_action': str 
+    }
+)
 
 
 def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
@@ -127,6 +135,14 @@ def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
     cached on memory.
     """
     return { 'original_url': url, 'resolved_url': rurl, 'data_size': size }
+
+
+def context_data(view: View) -> ViewState:
+    """
+    Get a context wherein classes with the same view can share data 
+    among themselves.
+    """
+    return ContextData.use(view)
 
 
 def startup(value: StartupEnum) -> StartupEnum:
