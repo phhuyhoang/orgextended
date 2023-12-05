@@ -51,6 +51,7 @@ from OrgExtended.orgutil.sublime_utils import (
     ContextData,
     PhantomsManager,
     SublimeStatusIndicator,
+    convert_length_to_px,
     find_by_selectors,
     find_by_selector_in_region,
     get_cursor_region,
@@ -82,7 +83,7 @@ SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
 SETTING_INSTANT_RENDER = 'extra.image.instantRender'
 SETTING_USE_LAZYLOAD = 'extra.image.useLazyload'
 
-REGEX_ORG_ATTR = re.compile(r":(\w+)\s(\d+)")
+REGEX_ORG_ATTR = re.compile(r":(\w+)\s([\d\.]+)([\w%]*)")
 REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
 
 LIST_SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif"]
@@ -167,22 +168,23 @@ def detect_region_range(view: View) -> RegionRange:
 
 
 def extract_dimensions_from_attrs(
+    view: View,
     textline: str,
     default_width: int = -1,
-    default_height: int = -1) -> Tuple[int, int]:
+    default_height: int = -1) -> Tuple[float, float]:
     """
-    Extract width and height from the #+ORG_ATTR line above a link.
+    Extract width and height in px from the #+ORG_ATTR line above a link.
     """
     try:
         attributes = re.findall(REGEX_ORG_ATTR, textline)
         width, height = default_width, default_height
         if textline.strip().startswith('#+ORG_ATTR:') and len(attributes) > 0:
             for attribute in attributes:
-                key, value = attribute
+                key, value, unit = attribute
                 if key == 'width':
-                    width = int(value)
+                    width = convert_length_to_px(view, value, unit, 'width')
                 elif key == 'height':
-                    height = int(value)
+                    height = convert_length_to_px(view, value, unit, 'height')
         return width, height
     except Exception as error:
         print(error)
@@ -648,6 +650,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             # Re-render if the ORG_ATTR got the image width or height change
             elif attr_state == last_data.get('with_attr') == True:
                 width, height = extract_dimensions_from_attrs(
+                    self.view,
                     self.view.substr(upper_line_region),
                     default_width = last_data.get('width', -1),
                     default_height = last_data.get('height', -1)
@@ -853,7 +856,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         it still returns False.
         """
         substr = self.view.substr(region)
-        width, height = extract_dimensions_from_attrs(substr)
+        width, height = extract_dimensions_from_attrs(self.view, substr)
         return width > 0 or height > 0
 
 
@@ -912,7 +915,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         :returns: A tuple containing width, height, and a boolean value 
         indicating whether the image is resized using ORG_ATTR.
         """
-        width, height = extract_dimensions_from_attrs(attr_line)
+        width, height = extract_dimensions_from_attrs(self.view, attr_line)
         if width > 0 and height > 0:
             return width, height, True
         else:

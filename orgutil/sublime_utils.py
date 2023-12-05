@@ -2,6 +2,7 @@
 Sublime Text utility functions
 """
 
+import re
 import uuid
 import sublime
 import sublime_plugin
@@ -11,6 +12,72 @@ from timeit import default_timer
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from OrgExtended.orgutil.util import safe_call, seconds_fmt
+from OrgExtended.orgutil.typecompat import Literal
+
+
+REGEX_LENGTH = re.compile(r'([0-9\.]+)(.*)')
+
+DimensionType = Literal['width', 'height']
+SupportedLengthUnit = Literal[
+    'cm', 
+    'mm', 
+    'in',
+    'px',
+    'pc',
+    'pt',
+    '%',
+    'vh',
+    'vw',
+    'rem',
+    None
+]
+
+
+def convert_length_to_px(
+    view: sublime.View, 
+    value: Union[str, int, float],
+    unit: SupportedLengthUnit = None,
+    dtype: DimensionType = 'width') -> float:
+    """
+    Supports converting some length units to pixels (px).\n
+    - Absolute units: cm, mm, in, pc, pt, px
+    - Relative units: %, vh, vw, rem
+
+    Ref: [MDN: CSS values and units](https://developer.mozilla.org/en-US/docs/Learn/CSS/Building_blocks/Values_and_units)
+    """
+    if unit is None:
+        value = str(value)
+        match = REGEX_LENGTH.match(value)
+        if not match:
+            return -1
+        value, unit = match.groups()
+    
+    vw, vh = view.viewport_extent()
+    if not unit or unit == 'px':
+        return float(value)
+    elif unit == '%' and dtype == 'width':
+        return vw * float(value) / 100
+    elif unit == '%' and dtype == 'height':
+        return vh * float(value) / 100
+    elif unit == 'vw':
+        return vw * float(value)
+    elif unit == 'vh':
+        return vh * float(value)
+    elif unit == 'rem':
+        font_size = view.settings().get('font_size', 10)
+        return float(font_size) * float(value)
+    elif unit == 'cm':
+        return 37.8 * float(value)
+    elif unit == 'mm':
+        return 37.8 * float(value) / 10
+    elif unit == 'in':
+        return 96 * float(value)
+    elif unit == 'pc':
+        return 96 * float(value) / 6
+    elif unit == 'pt':
+        return 96 * float(value) / 72
+    else:
+        return -1
 
 
 def find_by_selectors(
