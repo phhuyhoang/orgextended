@@ -881,30 +881,28 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             region = Region(*region)
             lines = lines_from_region(self.view, region)
             viewport_width, _ = self.view.viewport_extent()
-            link_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK)
+            href_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK_TEXT_HREF)
             image_dict = self.to_resolved_url_dict(images)
             original_urls = image_dict.keys()
-            for lr in link_regions:
-                substr = self.view.substr(lr)
-                line_region = self.view.line(lr)
+            for hr in href_regions:
+                url = self.view.substr(hr)
+                line_region = self.view.line(hr)
                 line_text = self.view.substr(line_region)
                 index = lines.index(line_text)
                 prev_line = lines[index - 1] if index > 0 else None
-                for url, _description in re.findall(REGEX_ORG_LINK, substr):
-                    resolved_url = image_dict.get(url)
-                    image_binary = ImageCache.get(resolved_url)
-                    if not url in original_urls or not image_binary:
-                        continue
-                    url_region = substring_region(self.view, lr, url)                    
-                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
-                    width, height = self.fit_to_viewport(viewport_width, width, height)
-                    self.render_image(
-                        url_region,
-                        image_binary,
-                        width,
-                        height,
-                        len(line_text) - len(line_text.lstrip()),
-                        is_resized)
+                resolved_url = image_dict.get(url)
+                image_binary = ImageCache.get(resolved_url)
+                if not url in original_urls or not image_binary:
+                    continue
+                width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
+                width, height = self.fit_to_viewport(viewport_width, width, height)
+                self.render_image(
+                    hr,
+                    image_binary,
+                    width,
+                    height,
+                    len(line_text) - len(line_text.lstrip()),
+                    is_resized)
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
