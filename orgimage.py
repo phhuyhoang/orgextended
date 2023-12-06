@@ -143,7 +143,12 @@ def context_data(view: View) -> ViewState:
     Get a context wherein classes with the same view can share data 
     among themselves.
     """
-    return ContextData.use(view)
+    view_state = ContextData.use(view)
+    # We should set the states default here
+    if len(view_state) == 0:
+        view_state['initialized'] = False
+        view_state['last_action'] = ''
+    return view_state
 
 
 def startup(value: StartupEnum) -> StartupEnum:
