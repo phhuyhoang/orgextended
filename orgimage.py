@@ -124,7 +124,7 @@ ViewState = TypedDict(
     'ViewState', 
     { 
         'initialized': bool, 
-        'last_action': str 
+        'prev_action': str 
     }
 )
 
@@ -147,7 +147,7 @@ def context_data(view: View) -> ViewState:
     # We should set the states default here
     if len(view_state) == 0:
         view_state['initialized'] = False
-        view_state['last_action'] = ''
+        view_state['prev_action'] = ''
     return view_state
 
 
@@ -364,7 +364,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
             return None
         current_status = view.get_status(STATUS_ID)
         # If the last action is save, that's ok to render the image again
-        if not current_status or self.last_action(view) == 'save':
+        if not current_status or self.prev_action(view) == 'save':
             view.run_command(COMMAND_SHOW_IMAGES, 
                 args = { 
                     'region_range': 'auto', 
@@ -395,7 +395,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         if view_state.get('initialized') == True:
             return None
 
-        view_state['last_action'] = default_action
+        view_state['prev_action'] = default_action
         view_state['initialized'] = True
 
 
@@ -435,12 +435,12 @@ class OrgExtraImage(sublime_plugin.EventListener):
 
 
     @staticmethod
-    def last_action(view: View) -> Action:
+    def prev_action(view: View) -> Action:
         """
         Latest action. 
         """
         view_state = context_data(view)
-        return view_state['last_action']
+        return view_state['prev_action']
 
 
     @staticmethod
@@ -449,7 +449,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         Sets the last action.
         """
         view_state = context_data(view)
-        view_state['last_action'] = action
+        view_state['prev_action'] = action
 
 
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
@@ -480,7 +480,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
             selected_region = self.select_region(region_range)
             image_regions = self.collect_image_regions(selected_region)
-            dimension_changed, phantomless = self.ignore_rendered_regions(image_regions)
+            dimension_changed, phantomless = self.ignore_unchanged(image_regions)
             image_regions = dimension_changed + phantomless
 
             if not image_regions:
@@ -620,7 +620,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 )
 
 
-    def ignore_rendered_regions(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
+    def ignore_unchanged(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
         """
         Filter out the regions that have been rendered by checking their
         existence on PhantomsManager.
