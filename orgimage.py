@@ -175,6 +175,20 @@ def startup(value: StartupEnum) -> StartupEnum:
     return Startup[value]
 
 
+def collect_image_regions(view: View, region: Region) -> List[Region]:
+    """
+    Collect all inlineimage regions in the specified region.
+    """
+    href_regions = find_by_selector_in_region(view, region, SELECTOR_ORG_LINK_TEXT_HREF)
+    image_regions = []
+    for region in href_regions:
+        url = view.substr(region)
+        is_image = any(url.endswith(ext) for ext in LIST_SUPPORTED_IMAGE_EXTENSIONS)
+        if is_image:
+            image_regions.append(region)
+    return image_regions
+
+
 def detect_region_range(view: View) -> RegionRange:
     """
     Detect current region range relies on the headings around the 
@@ -314,6 +328,17 @@ def resolve_remote(filepath: str, cwd: str = '') -> str:
             filepath = filepath[1:]
         return urllib.parse.urljoin(cwd, filepath)
     return ''
+
+
+def with_dimension_attributes(view: View, region: Region) -> bool:
+    """
+    Return True if a region line contains an ORG_ATTR comment
+    with value. In other words, if the line is just `#+ORG_ATTR:`,
+    it still returns False.
+    """
+    substr = view.substr(region)
+    width, height = extract_dimensions_from_attrs(view, substr)
+    return width > 0 or height > 0
 
 
 def matching_context(view: View) -> bool:
@@ -469,6 +494,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         view_state['prev_action'] = action
 
 
+
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     """
     Non-blocking load and show images in the current .org file. 
@@ -496,9 +522,15 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 region_range = detect_region_range(view)
 
             selected_region = self.select_region(region_range)
-            image_regions = self.collect_image_regions(selected_region)
+            image_regions = collect_image_regions(self.view, selected_region)
             dimension_changed, phantomless = self.ignore_unchanged(image_regions)
             image_regions = dimension_changed + phantomless
+
+            # Load images in a scratch buffer view (remote .org file) in
+            # an other way
+            cwd = self.get_url_from_scratch(self.view) \
+                if self.view.is_scratch() \
+                else path.dirname(self.view.file_name() or '')
 
             if not image_regions:
                 return self.handle_nothing_to_show(status_duration = 3)
@@ -506,6 +538,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 self.create_placeholder_phantoms(phantomless)
 
             urls = self.collect_image_urls(image_regions)
+            cached_urls, noncached_urls = self.prioritize_cached(urls, cwd)
 
             if no_download:
                 return self.handle_rendering_without_download(
@@ -517,49 +550,44 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 )
 
             status = self.use_status_indicator(region_range, len(urls))
-            pools = split_into_chunks(list(urls), DEFAULT_POOL_SIZE)
-            
             status.start()
-            
-            # Load images in a scratch buffer view (remote .org file) in
-            # an other way
-            if self.view.is_scratch():
-                sublime.set_timeout_async(
-                    lambda: self.parallel_requests_using_threads(
-                        pools = pools,
-                        cwd = self.get_url_from_scratch(self.view),
-                        on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
-                        on_error = lambda: status.failed(),
-                        on_finish = self.on_threads_finished(selected_region, status)))
-            else:
-                sublime.set_timeout_async(
-                    lambda: self.parallel_requests_using_threads(
-                        pools = pools,
-                        cwd = path.dirname(self.view.file_name() or ''),
-                        on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
-                        on_error = lambda: status.failed(),
-                        on_finish = self.on_threads_finished(selected_region, status)))
 
+            if cached_urls:
+                # The cached images should ignore the extra.image.instantRender 
+                # setting; otherwise, the main thread will be blocked during file 
+                # rescanning due to multiple render command callbacks. This is the 
+                # cause of the slowness when rendering so much images in a 
+                # large-sized file.
+                sublime.set_timeout_async(
+                    lambda: self.parallel_requests_using_threads(
+                        pools = split_into_chunks(list(cached_urls), DEFAULT_POOL_SIZE),
+                        cwd = cwd,
+                        on_data = lambda: status.succeed(),
+                        on_error = lambda: status.failed(),
+                        on_finish = self.on_threads_finished(
+                            selected_region,
+                            lambda timecost: status.stop(timecost) if not noncached_urls else None
+                        )
+                    )
+                )
+
+            # Download non-cached images
+            sublime.set_timeout_async(
+                lambda: self.parallel_requests_using_threads(
+                    pools = split_into_chunks(list(noncached_urls), DEFAULT_POOL_SIZE),
+                    cwd = cwd,
+                    on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
+                    on_error = lambda: status.failed(),
+                    on_finish = self.on_threads_finished(selected_region, lambda timecost: status.stop(timecost))
+                )
+            )
+                        
             sublime.set_timeout(
                 lambda: status.is_running() and status.set('Slow internet! Be patient...'),
                 len(urls) * 5 * 1000) # Limiting 5s for each downloading image
         except Exception as error:
             show_message(error, level = 'error')
             traceback.print_tb(error.__traceback__)
-
-
-    def collect_image_regions(self, region: Region) -> List[Region]:
-        """
-        Collect all inlineimage regions in the specified region.
-        """
-        href_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK_TEXT_HREF)
-        image_regions = []
-        for region in href_regions:
-            url = self.view.substr(region)
-            is_image = any(url.endswith(ext) for ext in LIST_SUPPORTED_IMAGE_EXTENSIONS)
-            if is_image:
-                image_regions.append(region)
-        return image_regions
 
 
     def create_placeholder_phantoms(self, regions: Region) -> None:
@@ -619,23 +647,12 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         tuple_region = region.to_tuple()
         images = map(lambda url: cached_image(url, resolve_local(url, cwd)), urls)
-        instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
-        if not instant_render_enabled:
-            return self.view.run_command(COMMAND_RENDER_IMAGES,
-                args = {
-                    'region': tuple_region,
-                    'images': images
-                }
-            )
-        else:
-            for image in images:
-                self.view.run_command(COMMAND_RENDER_IMAGES,
-                    args = {
-                        'region': tuple_region,
-                        'images': [image]
-                    }
-                )
-
+        return self.view.run_command(COMMAND_RENDER_IMAGES,
+            args = {
+                'region': tuple_region,
+                'images': images
+            }
+        )
 
     def ignore_unchanged(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
         """
@@ -663,7 +680,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             last_pid = pm.get_pid_by_region(region)
             last_data = pm.get_data_by_pid(last_pid) or {}
             upper_line_region = lines[index - 1]
-            attr_state = self.with_dimension_attributes(upper_line_region)
+            attr_state = with_dimension_attributes(self.view, upper_line_region)
 
             # Re-render if the ORG_ATTR line was added or removed
             if attr_state != last_data.get('with_attr', False):
@@ -690,8 +707,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         Implement the instant render option.
         """
-        def on_data(cached_image: CachedImage):
+        def on_data(cached_image: CachedImage, images: List[CachedImage]):
             instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
+            # Render that image and exclude it from re-rendering in the 
+            # 'finish' event.
             if instant_render_enabled:
                 self.view.run_command(COMMAND_RENDER_IMAGES, 
                     args = {
@@ -699,6 +718,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         'images': [cached_image],
                     }
                 )
+                images.remove(cached_image)
             if callable(then): safe_call(then, [cached_image])
         return on_data
 
@@ -706,21 +726,20 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     def on_threads_finished(
         self,
         region: Region,
-        status: SublimeStatusIndicator
+        then: Optional[Callable[[int], None]] = None
     ) -> Callable[[List[CachedImage], int], None]:
         """
         Chaining calls the next command to auto-render the cached images
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
-            status.stop(timecost)
-            instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
-            if not instant_render_enabled:
-                self.view.run_command(COMMAND_RENDER_IMAGES, 
-                    args = {
-                        'region': region.to_tuple(),
-                        'images': cached_images,
-                    }
-                )
+            if callable(then):
+                safe_call(then, [timecost])
+            self.view.run_command(COMMAND_RENDER_IMAGES, 
+                args = {
+                    'region': region.to_tuple(),
+                    'images': cached_images,
+                }
+            )
         return on_finish
 
 
@@ -818,6 +837,22 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return Region(0, self.view.size())
 
 
+    def prioritize_cached(self, urls: List[str], cwd: str) -> Tuple[Set[str], Set[str]]:
+        """
+        Separate the cached images from the ones should be downloaded 
+        before rendering.
+        Return two sets in order: cached and non-cached.
+        """
+        cached, non_cached = set(), set()
+        for url in urls:
+            resolved_url = resolve_local(url, cwd)
+            if ImageCache.has(resolved_url):
+                cached.add(url)
+            else:
+                non_cached.add(url)
+        return cached, non_cached
+
+
     def thread_execution(
         self,
         urls: List[str],
@@ -849,7 +884,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if loaded_binary is None and callable(on_error):
                 safe_call(on_error, [url])
             elif callable(on_data):
-                safe_call(on_data, [loaded_image])
+                safe_call(on_data, [loaded_image, loaded_images])
         return loaded_images
 
 
@@ -870,16 +905,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             total_count = total_count,
             update_interval = update_interval)
 
-
-    def with_dimension_attributes(self, region: Region) -> bool:
-        """
-        Return True if a region line contains an ORG_ATTR comment
-        with value. In other words, if the line is just `#+ORG_ATTR:`,
-        it still returns False.
-        """
-        substr = self.view.substr(region)
-        width, height = extract_dimensions_from_attrs(self.view, substr)
-        return width > 0 or height > 0
 
 
 class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
