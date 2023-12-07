@@ -103,8 +103,16 @@ LIST_HEADLINE_SELECTORS = [
 
 # Types
 Action = Literal['open', 'save', 'unfold', 'unknown']
-CachedImage = TypedDict('CachedImage', { 'original_url': str, 'resolved_url': str, 'data_size': Union[int, float] })
-OnData = Callable[['CachedImage'], None]
+CachedImage = TypedDict('CachedImage', { 
+    'original_url': str, 
+    'resolved_url': str, 
+    'data_size': Union[int, float]
+})
+RenderRegion = TypedDict('RenderRegion', { 
+    'resolved_url': str, 
+    'region': Tuple[int, int] 
+})
+OnData = Callable[['CachedImage', List['CachedImage']], None]
 OnError = Callable[[str], None]
 OnFinish = Callable[[List['CachedImage']], None]
 RegionRange = Literal['folding', 'all', 'pre-section', 'auto']
@@ -810,7 +818,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         timeout: Optional[float] = None
     ) -> List[CachedImage]:
         """
-        This method specifies what a thread will have to perform.
+        This method specifies what a thread should do.
         It's typically revolves around ensuring that the images have 
         been cached and are ready for rendering.
         """
