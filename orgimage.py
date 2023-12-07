@@ -159,6 +159,15 @@ def context_data(view: View) -> ViewState:
     return view_state
 
 
+def render_region(rurl: str, region: Region) -> RenderRegion:
+    """
+    Return an object can be used to transfer between commands when one 
+    needs to signal to the others that the image has been loaded and 
+    cached on memory.
+    """
+    return { 'resolved_url': rurl, 'region': region.to_tuple() }
+
+
 def startup(value: StartupEnum) -> StartupEnum:
     """
     Get a value from Startup enum in the manner of a bedridden old man
@@ -875,42 +884,108 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
 class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
     """
-    Render cached image to the view with the ideal size.
+    Render cached image to the view with the ideal size.\n
+    ---
+    Firstly, you need to know that ImageCache is a ConstrainedCache with 
+    keys being image URLs or absolute filepath, facilitating access to 
+    their cached binary data.\n
+    ---
+    There are three ways to use this command:\n
+    - Passing the `images` parameter: An array of CachedImage. The 
+    command, upon receiving this parameter, will automatically scan 
+    through all the phantoms containing images in the file and update 
+    those specified in `images` argument value. This is suitable in 
+    cases where you allow users to edit the file while waiting for 
+    images to be loaded. It's a relatively safe option, as it doesn't 
+    omit any images during rendering, but it's relatively slow due to 
+    the need to rescan the file.
+    - Passing the `href_render_regions` parameter: An array of RenderRegion 
+    pointing to the `orgmode.link.text.href` scopes. From these regions, 
+    you can directly extract image URLs to query the ConstrainedCache 
+    (e.g., https://example.com/image.png) and render them immediately. 
+    This is the fastest processing option; however, it's not safe. 
+    Any inadvertent edits to the file causing a mismatch in regions will 
+    lead to a series of subsequent images that cannot be rendered. You 
+    may need to set the file as read-only before using the command with 
+    this option.
+    - Passing the `link_render_regions` parameter: An array of RenderRegion 
+    pointing to the `orgmode.link` scopes. It's not significantly slower 
+    than the `href_render_regions` option, but it's still not a safe option.
     """
     def run(
         self, 
         edit, 
         region: Optional[Tuple[int, int]] = None,
         images: Optional[List[CachedImage]] = [],
-    ):
+        href_render_regions: Optional[List[RenderRegion]] = [],
+        link_render_regions: Optional[List[RenderRegion]] = [],
+    ) -> None:
         try:
             if not matching_context(self.view) or not region:
                 return None
-            region = Region(*region)
-            lines = lines_from_region(self.view, region)
-            viewport_width, _ = self.view.viewport_extent()
-            href_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK_TEXT_HREF)
-            image_dict = self.to_resolved_url_dict(images)
-            original_urls = image_dict.keys()
-            for hr in href_regions:
-                url = self.view.substr(hr)
-                line_region = self.view.line(hr)
-                line_text = self.view.substr(line_region)
-                index = lines.index(line_text)
-                prev_line = lines[index - 1] if index > 0 else None
-                resolved_url = image_dict.get(url)
-                image_binary = ImageCache.get(resolved_url)
-                if not url in original_urls or not image_binary:
-                    continue
-                width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
-                width, height = self.fit_to_viewport(viewport_width, width, height)
-                self.render_image(
-                    hr,
-                    image_binary,
-                    width,
-                    height,
-                    len(line_text) - len(line_text.lstrip()),
-                    is_resized)
+            if len(link_render_regions) > 0 and not href_render_regions:
+                href_render_regions = []
+                for lrr in link_render_regions:
+                    href_regions = find_by_selector_in_region(
+                        self.view, 
+                        Region(*lrr.get('region', (0, 0))),
+                        SELECTOR_ORG_LINK_TEXT_HREF
+                    )
+                    if href_regions:
+                        href_render_regions.append({ 
+                            'resolved_url': lrr.get('resolved_url'),
+                            'region': href_regions.pop(0)
+                        })
+            if len(href_render_regions) > 0:
+                lines = lines_from_region(self.view, Region(0, self.view.size()))
+                viewport_width, _ = self.view.viewport_extent()
+                for hrr in href_render_regions:
+                    render_region_tuple = hrr.get('region')
+                    resolved_url = hrr.get('resolved_url')
+                    image_binary = ImageCache.get(resolved_url)
+                    if not image_binary or not render_region_tuple:
+                        continue
+                    render_region = Region(*render_region_tuple)
+                    line_region = self.view.line(render_region)
+                    line_text = self.view.substr(line_region)
+                    index = lines.index(line_text)
+                    prev_line = lines[index - 1] if index > 0 else None
+                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
+                    width, height = self.fit_to_viewport(viewport_width, width, height)
+                    self.render_image(
+                        render_region,
+                        image_binary,
+                        width,
+                        height,
+                        len(line_text) - len(line_text.lstrip()),
+                        is_resized)
+                return None
+            else:
+                region = Region(*region)
+                lines = lines_from_region(self.view, region)
+                viewport_width, _ = self.view.viewport_extent()
+                image_dict = self.to_resolved_url_dict(images)
+                original_urls = image_dict.keys()
+                href_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK_TEXT_HREF)
+                for hr in href_regions:
+                    url = self.view.substr(hr)
+                    line_region = self.view.line(hr)
+                    line_text = self.view.substr(line_region)
+                    index = lines.index(line_text)
+                    prev_line = lines[index - 1] if index > 0 else None
+                    resolved_url = image_dict.get(url)
+                    image_binary = ImageCache.get(resolved_url)
+                    if not url in original_urls or not image_binary:
+                        continue
+                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
+                    width, height = self.fit_to_viewport(viewport_width, width, height)
+                    self.render_image(
+                        hr,
+                        image_binary,
+                        width,
+                        height,
+                        len(line_text) - len(line_text.lstrip()),
+                        is_resized)
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
