@@ -39,6 +39,7 @@ from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from OrgExtended.orgparse.startup import Startup
 from OrgExtended.orgutil.cache import ConstrainedCache
+from OrgExtended.orgutil.events import EventLoop, EventSymbol
 from OrgExtended.orgutil.image import (
     Height, 
     Width, 
@@ -75,6 +76,8 @@ ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 M
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
+
+EVENT_VIEWPORT_RESIZE = EventSymbol('viewport resize')
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
 SELECTOR_ORG_LINK = 'orgmode.link'
@@ -132,7 +135,8 @@ ViewState = TypedDict(
     'ViewState', 
     { 
         'initialized': bool, 
-        'prev_action': str 
+        'prev_action': str,
+        'viewport_extent': Tuple[float, float]
     }
 )
 
@@ -156,6 +160,7 @@ def context_data(view: View) -> ViewState:
     if len(view_state) == 0:
         view_state['initialized'] = False
         view_state['prev_action'] = ''
+        view_state['viewport_extent'] = view.viewport_extent()
     return view_state
 
 
