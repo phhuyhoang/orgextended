@@ -28,6 +28,7 @@ import re
 import traceback
 import sublime
 import sublime_plugin
+import threading
 import urllib.parse
 import urllib.request
 import OrgExtended.orgdb as db
@@ -37,6 +38,7 @@ from timeit import default_timer
 from sublime import Region, View
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from OrgExtended.pymitter import EventEmitter
 from OrgExtended.orgparse.startup import Startup
 from OrgExtended.orgutil.cache import ConstrainedCache
 from OrgExtended.orgutil.events import EventLoop, EventSymbol
@@ -62,7 +64,6 @@ from OrgExtended.orgutil.sublime_utils import (
     show_message,
     slice_regions,
     starmap_async,
-    substring_region,
 )
 from OrgExtended.orgutil.threads import starmap_pools
 from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
@@ -73,6 +74,7 @@ ONE_SECOND = 1000
 STATUS_ID = 'orgextra_image'
 
 ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
+eventemitter = EventEmitter()
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
@@ -134,11 +136,21 @@ StartupEnum = Literal[
 ViewState = TypedDict(
     'ViewState', 
     { 
+        # Should be True when a view is opened
         'initialized': bool, 
+        # Occasionally needed to allow continuous re-rendering
         'prev_action': str,
-        'viewport_extent': Tuple[float, float]
+        # Sometimes needed to simulate image responsive behavior
+        'viewport_extent': Tuple[float, float],
     }
 )
+
+
+def pre_close_event(view: View) -> str:
+    """
+    Returns a string that can be used as a key to emit close event.
+    """
+    return 'close_' + str(view.id())
 
 
 def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
@@ -426,6 +438,9 @@ class OrgExtraImage(sublime_plugin.EventListener):
         Should remove relevant data before closing out the view to
         avoid memory leaks.
         """
+        if matching_context(view):
+            kill_background_threads = pre_close_event(view)
+            eventemitter.emit(kill_background_threads)
         PhantomsManager.remove(view)
         ContextData.remove(view)
 
@@ -771,7 +786,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         significantly faster compared to the synchronous.
         """
         start = default_timer()
+        stop = pre_close_event(self.view)
+        flag = threading.Event()
         cached_images = []
+        eventemitter.once(stop, lambda: flag.set())
         def async_all_finish(ci: List[CachedImage]) -> None:
             if is_iterable(ci):
                 cached_images.extend(ci)
@@ -784,7 +802,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 cwd,
                 on_data,
                 on_error,
-                timeout),
+                timeout,
+                flag),
             args = pools,
             on_finish = async_all_finish)
 
@@ -811,19 +830,28 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         And of course it's way more faster compared to the traditional method.
         """
         start = default_timer()
-        results = shallow_flatten(
-            starmap_pools(
-                lambda urls: self.thread_execution(
-                    urls, 
-                    cwd, 
-                    on_data, 
-                    on_error, 
-                    timeout),
-                pools
-            ))
-        end = default_timer()
-        if callable(on_finish):
-            safe_call(on_finish, [results, end - start])
+        flag = threading.Event()
+        pre_close = pre_close_event(self.view)
+        listener = lambda: flag.set()
+        eventemitter.once(pre_close, listener)
+        try:
+            results = shallow_flatten(
+                starmap_pools(
+                    lambda urls: self.thread_execution(
+                        urls, 
+                        cwd, 
+                        on_data, 
+                        on_error, 
+                        timeout,
+                        flag),
+                    pools
+                ))
+            if callable(on_finish):
+                safe_call(on_finish, [results, default_timer() - start])
+        except:
+            results = []
+        finally:
+            eventemitter.off(pre_close, listener)
         return results
 
 
@@ -864,7 +892,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         cwd: str,
         on_data: Optional[OnData] = None,
         on_error: Optional[OnError] = None,
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        stop_event: Optional[threading.Event] = None,
     ) -> List[CachedImage]:
         """
         This method specifies what a thread should do.
@@ -873,6 +902,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         loaded_images = []
         for url in urls:
+            if isinstance(stop_event, threading.Event):
+                if stop_event.is_set():
+                    raise ThreadTermination()
             resolved_url = resolve_local(url, cwd)
             loaded_binary = None
             cached_binary = ImageCache.get(resolved_url)
@@ -1115,3 +1147,12 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 continue
             resolved_url_dict[original_url] = image.get('resolved_url')
         return resolved_url_dict
+
+
+class ThreadTermination(Exception):
+    """
+    Indicates that a thread has been terminated from within by some 
+    reason.
+    """
+    pass
+    

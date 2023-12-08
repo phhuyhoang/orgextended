@@ -351,7 +351,10 @@ def shallow_flatten(array: List) -> List:
     """
     Flattens a list of lists one-level of depth.
     """
-    return [x for y in array for x in y]
+    try:
+        return [x for y in array for x in y] if len(array) else []
+    except:
+        return []
 
 
 def sizeof_fmt(num, suffix="B"):
