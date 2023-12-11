@@ -39,7 +39,7 @@ from sublime import Region, View
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from OrgExtended.pymitter import EventEmitter
-from OrgExtended.orgparse.startup import Startup
+from OrgExtended.orgparse.startup import Startup as StartupValue
 from OrgExtended.orgutil.cache import ConstrainedCache
 from OrgExtended.orgutil.events import EventLoop, EventSymbol
 from OrgExtended.orgutil.image import (
@@ -74,7 +74,7 @@ ONE_SECOND = 1000
 STATUS_ID = 'orgextra_image'
 
 ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
-eventemitter = EventEmitter()
+emitter = EventEmitter()
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
@@ -107,21 +107,23 @@ LIST_HEADLINE_SELECTORS = [
 
 
 # Types
-Action = Literal['open', 'save', 'unfold', 'unknown']
-CachedImage = TypedDict('CachedImage', { 
-    'original_url': str, 
-    'resolved_url': str, 
-    'data_size': Union[int, float]
+Action = Literal[
+    'open', 
+    'save', 
+    'unfold', 
+    'undefined'
+]
+CachedImage = TypedDict('CachedImage', {
+    'original_url': Optional[str],
+    'resolved_url': str,
+    'size': Optional[str],
+    'region': Optional[str],
 })
-RenderRegion = TypedDict('RenderRegion', { 
-    'resolved_url': str, 
-    'region': Tuple[int, int] 
-})
-OnData = Callable[['CachedImage', List['CachedImage']], None]
-OnError = Callable[[str], None]
-OnFinish = Callable[[List['CachedImage']], None]
+OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
+OnErrorHandler = Callable[[str], None]
+OnFinishHandler = Callable[[List['CachedImage']], None]
 RegionRange = Literal['folding', 'all', 'pre-section', 'auto']
-StartupEnum = Literal[
+Startup = Literal[
     "overview",
     "content",
     "showall",
@@ -133,14 +135,23 @@ StartupEnum = Literal[
     "logdone",
     "lognotedone"
 ]
-ViewState = TypedDict(
-    'ViewState', 
+ViewStates = TypedDict(
+    'ViewStates', 
     { 
-        # Should be True when a view is opened
+        # Should be `True` from the moment a view gains focus.
         'initialized': bool, 
-        # Occasionally needed to allow continuous re-rendering
+        # Indicates the previous triggered image rendering was based on 
+        # which user action. It's necessary to help skip some rendering 
+        # steps to achieve instant responsiveness.
+        # For example, with the 'save' action. This is a common action 
+        # users take after editing ORG_ATTR, expecting to see instant 
+        # changes. So, what makes us have to reload images after this 
+        # action instead of just rendering what's already available?
         'prev_action': str,
-        # Sometimes needed to simulate image responsive behavior
+        # The event loop will compare this value between two ticks to 
+        # decide whether to render the images again. It helps simulate 
+        # the behavior of image responsiveness, albeit with an expensive 
+        # effort.
         'viewport_extent': Tuple[float, float],
     }
 )
@@ -148,7 +159,8 @@ ViewState = TypedDict(
 
 def pre_close_event(view: View) -> str:
     """
-    Returns a string that can be used as a key to emit close event.
+    Returns a string that can be used as a key to emit the close event for
+    a specific view.
     """
     return 'close_' + str(view.id())
 
@@ -162,7 +174,7 @@ def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
     return { 'original_url': url, 'resolved_url': rurl, 'data_size': size }
 
 
-def context_data(view: View) -> ViewState:
+def context_data(view: View) -> ViewStates:
     """
     Get a context wherein classes with the same view can share data 
     among themselves.
@@ -176,20 +188,11 @@ def context_data(view: View) -> ViewState:
     return view_state
 
 
-def render_region(rurl: str, region: Region) -> RenderRegion:
-    """
-    Return an object can be used to transfer between commands when one 
-    needs to signal to the others that the image has been loaded and 
-    cached on memory.
-    """
-    return { 'resolved_url': rurl, 'region': region.to_tuple() }
-
-
-def startup(value: StartupEnum) -> StartupEnum:
+def startup(value: Startup) -> StartupValue:
     """
     Get a value from Startup enum in the manner of a bedridden old man
     """
-    return Startup[value]
+    return StartupValue[value]
 
 
 def collect_image_regions(view: View, region: Region) -> List[Region]:
@@ -313,9 +316,46 @@ def find_headings_around_cursor(
     return prev, next
 
 
+def is_folding_section(view: View) -> bool:
+    """
+    Return True if the cursor is positioned at a headline and the 
+    content in that section headline is folding.
+    """
+    node = db.Get().AtInView(view)
+    if node and not node.is_root():
+        row, _col = view.curRowCol()
+        if node.start_row == row and not node.is_folded(view):
+            return True
+    return False
+
+
+def get_cwd(view: View) -> str:
+    """
+    Return the current working directory (cwd) if the current view is 
+    not a scratch buffer. If it is, return the cwd depending on the url 
+    of the opened scratch buffer.
+    """
+    cwd = get_url_from_scratch(view) \
+        if view.is_scratch() \
+        else path.dirname(view.file_name() or '')
+    return cwd
+
+
+def get_url_from_scratch(view: View) -> str:
+    """
+    A dumb way to get the url from a buffer that is opening a 
+    remote .org file
+    """
+    name = view.name()
+    if name.strip().startswith('[org-remote]'):
+        url = name.replace('[org-remote]', '').strip()
+        return url
+    return ''
+
+
 def resolve_local(url: str, cwd: str = '/') -> str:
     """
-    Convert any case of local path to absolute path, skip remote url.
+    Convert any case of local path to absolute path, ignoring remote url.
     """
     if not url.startswith('http:') and not url.startswith('https:'):
         filepath = url
@@ -332,9 +372,9 @@ def resolve_local(url: str, cwd: str = '/') -> str:
 
 def resolve_remote(filepath: str, cwd: str = '') -> str:
     """
-    Convert any case of remote url to absolute url. This function can be
-    used to convert relative links in remote .org file to absoluted links.    
-    From there we can load images for them.
+    Convert any case of a remote URL to an absolute URL. This function can be
+    used to convert relative links in a remote .org file to absolute links,
+    allowing us to load images for them without worry.
     """
     if filepath.startswith('http:') or filepath.startswith('https:'):
         return filepath
@@ -351,7 +391,7 @@ def with_dimension_attributes(view: View, region: Region) -> bool:
     """
     Return True if a region line contains an ORG_ATTR comment
     with value. In other words, if the line is just `#+ORG_ATTR:`,
-    it still returns False.
+    return False as usual.
     """
     substr = view.substr(region)
     width, height = extract_dimensions_from_attrs(view, substr)
@@ -360,8 +400,8 @@ def with_dimension_attributes(view: View, region: Region) -> bool:
 
 def matching_context(view: View) -> bool:
     """
-    Run this function on top of every run() method to filter out most 
-    of unappropriate context (early return)
+    Run this function on top of the method to filter out most of 
+    unappropriate scope.
     """
     if not view.match_selector(0, SELECTOR_ORG_SOURCE):
         return False
@@ -387,50 +427,46 @@ class OrgExtraImage(sublime_plugin.EventListener):
 
     def on_post_text_command(self, view: View, command: str, args: Dict) -> Any:
         """
-        Catches the OrgTabCyclingCommand to add the behavior of 
-        automatically loading images when we unfold the content of 
-        a section.
+        Show images upon unfolding a section.
         """
         if command != 'org_tab_cycling':
-            return None
-        lazyload_images = settings.Get(SETTING_USE_LAZYLOAD, False)
-        if not lazyload_images:
-            return None
-        current_status = view.get_status(STATUS_ID)
-        if current_status:
-            return None
-        if self.is_folding_section(view):
-            view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'folding' })
-            self.update_action(view, 'unfold')
+            lazyload_images = settings.Get(SETTING_USE_LAZYLOAD, False)
+            if not lazyload_images:
+                return None
+            status_message = view.get_status(STATUS_ID)
+            if status_message:
+                return None
+            if is_folding_section(view):
+                view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'folding' })
+                self.set_action(view, 'unfold')
 
 
     def on_post_save(self, view: View) -> Any:
         """
-        May re-render images when the ORG_ATTR values changed
+        Instantly re-render images upon saving if any ORG_ATTR values 
+        associated with them are changed.
         """
         if not matching_context(view):
             return None
         if not PhantomsManager.is_being_managed(view):
             return None
-        file = db.Get().FindInfo(view)
-        setting_startup = settings.Get('startup', ['showall'])
-        inbuffer_startup = file.org[0].startup(setting_startup)
-        prohibit_range = LIST_OUTSIDE_SECTION_REGION_RANGES
         region_range = detect_region_range(view)
+        prohibit_range = LIST_OUTSIDE_SECTION_REGION_RANGES
+        inbuffer_startup = self.get_inbuffer_startup(view)
         # We should not render things outside the folding section if the 
         # STARTUP: inlineimages is not set, unless you unfolded something
         if region_range in prohibit_range and startup('inlineimages') not in inbuffer_startup:
             return None
         current_status = view.get_status(STATUS_ID)
-        # If the last action is save, that's ok to render the image again
-        if not current_status or self.prev_action(view) == 'save':
+        # If the last action is `save`, that's ok to render the image again
+        if not current_status or self.get_previous_action(view) == 'save':
             view.run_command(COMMAND_SHOW_IMAGES, 
                 args = { 
                     'region_range': 'auto', 
                     'no_download': True, 
                 }
             )
-            self.update_action(view, 'save')
+            self.set_action(view, 'save')
 
 
     def on_pre_close(self, view: sublime.View):
@@ -439,8 +475,8 @@ class OrgExtraImage(sublime_plugin.EventListener):
         avoid memory leaks.
         """
         if matching_context(view):
-            kill_background_threads = pre_close_event(view)
-            eventemitter.emit(kill_background_threads)
+            pre_close = pre_close_event(view)
+            emitter.emit(pre_close)
         PhantomsManager.remove(view)
         ContextData.remove(view)
 
@@ -452,30 +488,28 @@ class OrgExtraImage(sublime_plugin.EventListener):
         """
         if not matching_context(view):
             return None
-
-        view_state = context_data(view)
-        if view_state.get('initialized') == True:
-            return None
-
-        view_state['prev_action'] = default_action
-        view_state['initialized'] = True
+        view_states = context_data(view)
+        if not view_states.get('initialized') == True:
+            view_states['initialized'] = True
+            view_states['prev_action'] = default_action
+        cls.kickstart_phantom_manager(view)
 
 
     def autoload(self, view: View) -> None:
         """
-        Show all images on the view. This action should only be done once 
-        each time the file have opened with the inlineimages startup.
+        Display all images in the view. This action should only be 
+        performed once each time the file is opened with the 'inlineimages' 
+        startup in-buffer setting.
         """
         if not matching_context(view):
             return None
-        # Stop if the current view already been rendered
+        # If the images have rendered before, it means its phantoms have 
+        # been overseeing by the PhantomsManager as well. We should not 
+        # do it again.
         if PhantomsManager.is_being_managed(view):
             return None
         try:
-            file = db.Get().FindInfo(view)
-            setting_startup = settings.Get('startup', ['showall'])
-            inbuffer_startup = file.org[0].startup(setting_startup)
-            PhantomsManager.use(view)
+            inbuffer_startup = self.get_inbuffer_startup(view)
             if startup('inlineimages') in inbuffer_startup:
                 view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'all' })
         except Exception as error:
@@ -483,32 +517,44 @@ class OrgExtraImage(sublime_plugin.EventListener):
             traceback.print_tb(error.__traceback__)
 
 
-    def is_folding_section(self, view: View) -> bool:
+    @staticmethod
+    def get_inbuffer_startup(view: View) -> List[str]:
         """
-        Return True if the cursor is positioned at a headline and the 
-        content in that section headline is folding.
+        Get the in-buffer startup values place on the top of the document.
         """
-        node = db.Get().AtInView(view)
-        if node and not node.is_root():
-            row, _col = view.curRowCol()
-            if node.start_row == row and not node.is_folded(view):
-                return True
-        return False
+        file = db.Get().FindInfo(view)
+        setting_startup = settings.Get('startup', ['showall'])
+        inbuffer_startup = file.org[0].startup(setting_startup)
+        return inbuffer_startup
 
 
     @staticmethod
-    def prev_action(view: View) -> Action:
+    def get_previous_action(view: View) -> Action:
         """
-        Latest action. 
+        Indicates the previous triggered image rendering was based on 
+        which user action. It's necessary to help skip some rendering 
+        steps to achieve instant responsiveness.
+        For example, with the 'save' action. This is a common action 
+        users take after editing ORG_ATTR, expecting to see instant 
+        changes. So, what makes us have to reload images after this 
+        action instead of just rendering what's already available?
         """
         view_state = context_data(view)
         return view_state['prev_action']
 
 
     @staticmethod
-    def update_action(view: View, action: Action) -> 'OrgExtraImage':
+    def kickstart_phantom_manager(view: View) -> PhantomsManager:
         """
-        Sets the last action.
+        Initialize Phantom Manager for the corresponding view.
+        """
+        PhantomsManager.adopt(view)
+
+
+    @staticmethod
+    def set_action(view: View, action: Action) -> 'OrgExtraImage':
+        """
+        Report which action has just been executed.
         """
         view_state = context_data(view)
         view_state['prev_action'] = action
@@ -517,15 +563,17 @@ class OrgExtraImage(sublime_plugin.EventListener):
 
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     """
-    Non-blocking load and show images in the current .org file. 
-    Supports two options of render range:\n
+    An improved version of the legacy org_show_images, with the ability 
+    to load images in independent threads (non-blocking) and 
+    resource-sharing capabilities.
+    Supports rendering range options:\n
     - 'folding': Loads and renders all images in the folding content. 
       (Default option)\n
-    - 'all': Loads and renders all images in the whole document.
-      (Auto-applied this option on the file that use #+STARTUP: inlineimages)
+    - 'all': Loads and renders all images in the entire document. 
+      (Automatically applied to files with the setting #+STARTUP: inlineimages)
     - 'pre-section': Applies to the region preceding the first heading 
       in the document.
-    - 'auto': Auto detection.
+    - 'auto': Automatically detects the rendering range.
     """
     def run(
         self, 
@@ -542,18 +590,17 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 region_range = detect_region_range(view)
 
             selected_region = self.select_region(region_range)
-            image_regions = collect_image_regions(self.view, selected_region)
+            image_regions = collect_image_regions(view, selected_region)
             dimension_changed, phantomless = self.ignore_unchanged(image_regions)
             image_regions = dimension_changed + phantomless
 
             # Load images in a scratch buffer view (remote .org file) in
-            # an other way
-            cwd = self.get_url_from_scratch(self.view) \
-                if self.view.is_scratch() \
-                else path.dirname(self.view.file_name() or '')
+            # a different manner.
+            cwd = get_cwd(view)
 
+            # Show a status message: Nothing to render.
             if not image_regions:
-                return self.handle_nothing_to_show(status_duration = 3)
+                return self.handle_nothing_changed(status_duration = 3)
             if len(phantomless):
                 self.create_placeholder_phantoms(phantomless)
 
@@ -561,12 +608,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             cached_urls, noncached_urls = self.prioritize_cached(urls, cwd)
 
             if no_download:
-                return self.handle_rendering_without_download(
+                return self.handle_direct_rendering(
                     region = selected_region,
                     urls = urls,
-                    cwd = self.get_url_from_scratch(self.view) \
-                        if self.view.is_scratch() \
-                        else path.dirname(self.view.file_name() or ''),
+                    cwd = cwd,
                 )
 
             status = self.use_status_indicator(region_range, len(urls))
@@ -602,9 +647,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 )
             )
                         
+            # Limiting to 5 seconds for each image download.
+            # If all images exceed this time threshold, the status 
+            # message below will be set.
             sublime.set_timeout(
-                lambda: status.is_running() and status.set('Slow internet! Be patient...'),
-                len(urls) * 5 * 1000) # Limiting 5s for each downloading image
+                lambda: status.is_running() \
+                    and status.set('Slow internet! Be patient...'),
+                len(urls) * 5 * 1000)
         except Exception as error:
             show_message(error, level = 'error')
             traceback.print_tb(error.__traceback__)
@@ -612,11 +661,11 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
     def create_placeholder_phantoms(self, regions: Region) -> None:
         """
-        Should pre-create phantoms to tracking the regions for in-time 
-        rendering instead of after all. It enhances the user experience 
-        and allows for file editing while waiting for images to load.
+        Pre-create phantoms to track the regions for in-time rendering 
+        instead of doing so afterward. This enhances the user experience 
+        and enables file editing while waiting for images to load.
         """
-        pm = PhantomsManager.use(self.view)
+        pm = PhantomsManager.of(self.view)
         for image_region in regions:
             if pm.has_phantom(image_region):
                 pid = pm.get_pid_by_region(image_region)
@@ -626,47 +675,41 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
     def collect_image_urls(self, regions: List[Region]) -> Set[str]:
         """
-        Collect urls as string from their regions (with duplicate 
-        removed to optimize the downloading time).
+        Collect URLs as strings from their respective regions, removing 
+        duplicates to optimize download time.
         """
         urls = map(lambda r: self.view.substr(r), regions)
         return set(urls)
 
 
-    def get_url_from_scratch(self, view: View) -> str:
+    def handle_nothing_changed(self, status_duration: int) -> None:
         """
-        A dumb way to get the url from a buffer that is opening a 
-        remote .org file
-        """
-        name = view.name()
-        if name.strip().startswith('[org-remote]'):
-            url = name.replace('[org-remote]', '').strip()
-            return url
-        return ''
-
-
-    def handle_nothing_to_show(self, status_duration: int) -> None:
-        """
-        Should only call this method with a return statement when the 
-        view has nothing to update
+        Only call this method with a return statement when the view has 
+        nothing to update.
         
         :param      status_duration:  Delay in second to clear the status message
         """
         return set_temporary_status(self.view, STATUS_ID, 'Nothing to render.', status_duration)
 
 
-    def handle_rendering_without_download(
+    def handle_direct_rendering(
         self, 
         region: Region,
         urls: List[str], 
         cwd: str
     ) -> None:
         """
-        When this method is called, nothing new will be cached, so the 
-        render command may reuse what has already been cached.
+        When this method is called, ignore the download step, nothing 
+        new will be cached, so the render command may reuse what has 
+        already been cached.
         """
         tuple_region = region.to_tuple()
-        images = map(lambda url: cached_image(url, resolve_local(url, cwd)), urls)
+        images = list(
+            map(
+                lambda url: cached_image(url, resolve_local(url, cwd)), 
+                urls
+            )
+        )
         return self.view.run_command(COMMAND_RENDER_IMAGES,
             args = {
                 'region': tuple_region,
@@ -676,14 +719,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
     def ignore_unchanged(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
         """
-        Filter out the regions that have been rendered by checking their
-        existence on PhantomsManager.
-        These are some exceptions that would be ignored by the filter 
-        to re-rendering:
-        - When ORG_ATTR has added or removed
-        - When the :width or :height values of ORG_ATTR have changed
+        Filter out the regions that have already been rendered by 
+        checking their existence in PhantomsManager. There are some 
+        exceptions that will be included by the filter for re-rendering:
+        - When ORG_ATTR has been added or removed.
+        - When the :width or :height values of ORG_ATTR have changed.
         """
-        pm = PhantomsManager.use(self.view)
+        pm = PhantomsManager.of(self.view)
         lines = self.view.lines(Region(0, self.view.size()))
         rendered_regions = pm.get_all_overseeing_regions()
         phantomless_regions = []
@@ -723,15 +765,15 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     def on_downloaded(
         self,
         region: Region,
-        then: Optional[OnData] = None) -> OnData:
+        then: Optional[OnDataHandler] = None) -> OnDataHandler:
         """
-        Implement the instant render option.
+        Implement the instant render behaviour.
         """
         def on_data(cached_image: CachedImage, images: List[CachedImage]):
-            instant_render_enabled = settings.Get(SETTING_INSTANT_RENDER, False)
+            instant_render = settings.Get(SETTING_INSTANT_RENDER, False)
             # Render that image and exclude it from re-rendering in the 
             # 'finish' event.
-            if instant_render_enabled:
+            if instant_render:
                 self.view.run_command(COMMAND_RENDER_IMAGES, 
                     args = {
                         'region': region.to_tuple(),
@@ -749,7 +791,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         then: Optional[Callable[[int], None]] = None
     ) -> Callable[[List[CachedImage], int], None]:
         """
-        Chaining calls the next command to auto-render the cached images
+        Chaining calls the render command to automatically render the 
+        cached images.
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
             if callable(then):
@@ -767,29 +810,28 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         pools: List[List[str]],
         cwd: str,
-        on_data: Optional[OnData] = None,
-        on_error: Optional[OnError] = None,
-        on_finish: Optional[OnFinish] = None,
+        on_data: Optional[OnDataHandler] = None,
+        on_error: Optional[OnErrorHandler] = None,
+        on_finish: Optional[OnFinishHandler] = None,
         timeout: Optional[float] = None
     ) -> None:
         """
-        Asynchronously run fetching image operations, which each one
-        take a list of urls/filepaths that would be loaded one after 
-        another.
-        These are the measurement results can be compare to 
-        `.parallel_requests_using_threads()`: \n
+        Asynchronously run fetching image operations, where each 
+        operation takes a list of URLs/filepaths that will be loaded one 
+        after another. The following are the measurement results that 
+        can be compared to `.parallel_requests_using_threads()`:
         - 1 image link: 1.482095375999961, 1.335890114999529, 1.298129551000784
         - 10 image links: 8.051044771000306, 7.954113742000118, 8.047068934999515
         - 85 image links: 93.40657268199993
         I don't quite understand the mechanism behind this API, nor 
-        whether I am using it correctly but it doesn't seem 
-        significantly faster compared to the synchronous.
+        whether I am using it correctly, but it doesn't seem 
+        significantly faster compared to the synchronous approach.
         """
         start = default_timer()
         stop = pre_close_event(self.view)
         flag = threading.Event()
         cached_images = []
-        eventemitter.once(stop, lambda: flag.set())
+        emitter.once(stop, lambda: flag.set())
         def async_all_finish(ci: List[CachedImage]) -> None:
             if is_iterable(ci):
                 cached_images.extend(ci)
@@ -812,28 +854,29 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         pools: List[List[str]],
         cwd: str,
-        on_data: Optional[OnData] = None,
-        on_error: Optional[OnError] = None,
-        on_finish: Optional[OnFinish] = None,
+        on_data: Optional[OnDataHandler] = None,
+        on_error: Optional[OnErrorHandler] = None,
+        on_finish: Optional[OnFinishHandler] = None,
         timeout: Optional[float] = None
     ) -> List[CachedImage]:
         """
-        Run threads of fetching image operation in parallel, which each 
-        thread take a list of urls/filepaths that would be loaded one 
+        Run threads of fetching image operations in parallel, where each 
+        thread takes a list of urls/filepaths that will be loaded one 
         after another.
-        These are the measurement results can be compare to 
+        The following are the measurement results that can be compared to 
         `.parallel_requests_using_sublime_timeout()`: \n
         * 1 image link: 1.1709886939997887, 1.2005657659992721, 1.2650837740002316 \n
         * 10 image links: 1.387642825000512, 1.5033762000002753, 2.1559584730002825 \n
         * 85 image links: 16.07192872700034, 12.695106612000018, 9.564963673999955 \n
-        As you see, it's up to ten times faster. \n
-        And of course it's way more faster compared to the traditional method.
+        As you can see, it's up to ten times faster. \n
+        And of course it's way more faster compared to the traditional 
+        method.
         """
         start = default_timer()
         flag = threading.Event()
         pre_close = pre_close_event(self.view)
         listener = lambda: flag.set()
-        eventemitter.once(pre_close, listener)
+        emitter.once(pre_close, listener)
         try:
             results = shallow_flatten(
                 starmap_pools(
@@ -851,7 +894,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         except:
             results = []
         finally:
-            eventemitter.off(pre_close, listener)
+            emitter.off(pre_close, listener)
         return results
 
 
@@ -872,8 +915,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
     def prioritize_cached(self, urls: List[str], cwd: str) -> Tuple[Set[str], Set[str]]:
         """
-        Separate the cached images from the ones should be downloaded 
-        before rendering.
+        Separate the cached images from those that should be downloaded 
+        before rendering. 
         Return two sets in order: cached and non-cached.
         """
         cached, non_cached = set(), set()
@@ -890,15 +933,15 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         urls: List[str],
         cwd: str,
-        on_data: Optional[OnData] = None,
-        on_error: Optional[OnError] = None,
+        on_data: Optional[OnDataHandler] = None,
+        on_error: Optional[OnErrorHandler] = None,
         timeout: Optional[float] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> List[CachedImage]:
         """
-        This method specifies what a thread should do.
-        It's typically revolves around ensuring that the images have 
-        been cached and are ready for rendering.
+        This method specifies what a thread should do, typically 
+        revolving around ensuring that the images have been cached and 
+        are ready for rendering.
         """
         loaded_images = []
         for url in urls:
@@ -932,7 +975,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         update_interval: Optional[int] = 100,
     ) -> SublimeStatusIndicator:
         """
-        Setup a loading indicator on status bar
+        Setup a loading indicator with messages on the status bar
         """
         mode = 'inlineimages' if region_range == 'all' else 'unfold'
         area = 'current document' if region_range == 'all' else 'folding content'
@@ -952,102 +995,37 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
     keys being image URLs or absolute filepath, facilitating access to 
     their cached binary data.\n
     ---
-    There are three ways to use this command:\n
-    - Passing the `images` parameter: An array of CachedImage. The 
-    command, upon receiving this parameter, will automatically scan 
-    through all the phantoms containing images in the file and update 
-    those specified in `images` argument value. This is suitable in 
-    cases where you allow users to edit the file while waiting for 
-    images to be loaded. It's a relatively safe option, as it doesn't 
-    omit any images during rendering, but it's relatively slow due to 
-    the need to rescan the file.
-    - Passing the `href_render_regions` parameter: An array of RenderRegion 
-    pointing to the `orgmode.link.text.href` scopes. From these regions, 
-    you can directly extract image URLs to query the ConstrainedCache 
-    (e.g., https://example.com/image.png) and render them immediately. 
-    This is the fastest processing option; however, it's not safe. 
-    Any inadvertent edits to the file causing a mismatch in regions will 
-    lead to a series of subsequent images that cannot be rendered. You 
-    may need to set the file as read-only before using the command with 
-    this option.
-    - Passing the `link_render_regions` parameter: An array of RenderRegion 
-    pointing to the `orgmode.link` scopes. It's not significantly slower 
-    than the `href_render_regions` option, but it's still not a safe option.
+    There are two ways to use this command:
+    - With rescan: Automatically rescan the provided region to 
+    search for all phantoms containing images and update those specified 
+    in the images argument value. This is suitable in cases where you 
+    want to allow users to edit the file while waiting for images to 
+    be loaded. It's a relatively safe option, as it doesn't omit any 
+    images during rendering, but it's relatively slow due to the need 
+    to rescan the file.
+    - Without rescan: Render images directly without re-scanning by 
+    using region of each image provided in the images list. This option 
+    is faster but may not be as safe, especially if there are inadvertent 
+    edits to the file causing a mismatch with the specified images, 
+    leading to a series of subsequent images that cannot be rendered. You 
+    probably need to set the file as read-only before using the command 
+    and ensure that all provided regions point to scopes matching the 
+    `orgmode.link.text.href` selector to make the command work.
     """
     def run(
-        self, 
-        edit, 
+        self,
+        edit,
         region: Optional[Tuple[int, int]] = None,
-        images: Optional[List[CachedImage]] = [],
-        href_render_regions: Optional[List[RenderRegion]] = [],
-        link_render_regions: Optional[List[RenderRegion]] = [],
+        images: List[CachedImage] = [],
+        rescan: bool = True,
     ) -> None:
         try:
             if not matching_context(self.view) or not region:
                 return None
-            if len(link_render_regions) > 0 and not href_render_regions:
-                href_render_regions = []
-                for lrr in link_render_regions:
-                    href_regions = find_by_selector_in_region(
-                        self.view, 
-                        Region(*lrr.get('region', (0, 0))),
-                        SELECTOR_ORG_LINK_TEXT_HREF
-                    )
-                    if href_regions:
-                        href_render_regions.append({ 
-                            'resolved_url': lrr.get('resolved_url'),
-                            'region': href_regions.pop(0)
-                        })
-            if len(href_render_regions) > 0:
-                lines = lines_from_region(self.view, Region(0, self.view.size()))
-                viewport_width, _ = self.view.viewport_extent()
-                for hrr in href_render_regions:
-                    render_region_tuple = hrr.get('region')
-                    resolved_url = hrr.get('resolved_url')
-                    image_binary = ImageCache.get(resolved_url)
-                    if not image_binary or not render_region_tuple:
-                        continue
-                    render_region = Region(*render_region_tuple)
-                    line_region = self.view.line(render_region)
-                    line_text = self.view.substr(line_region)
-                    index = lines.index(line_text)
-                    prev_line = lines[index - 1] if index > 0 else None
-                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
-                    width, height = self.fit_to_viewport(viewport_width, width, height)
-                    self.render_image(
-                        render_region,
-                        image_binary,
-                        width,
-                        height,
-                        len(line_text) - len(line_text.lstrip()),
-                        is_resized)
-                return None
+            if rescan:
+                self.handle_rescan_render(region, images)
             else:
-                region = Region(*region)
-                lines = lines_from_region(self.view, region)
-                viewport_width, _ = self.view.viewport_extent()
-                image_dict = self.to_resolved_url_dict(images)
-                original_urls = image_dict.keys()
-                href_regions = find_by_selector_in_region(self.view, region, SELECTOR_ORG_LINK_TEXT_HREF)
-                for hr in href_regions:
-                    url = self.view.substr(hr)
-                    line_region = self.view.line(hr)
-                    line_text = self.view.substr(line_region)
-                    index = lines.index(line_text)
-                    prev_line = lines[index - 1] if index > 0 else None
-                    resolved_url = image_dict.get(url)
-                    image_binary = ImageCache.get(resolved_url)
-                    if not url in original_urls or not image_binary:
-                        continue
-                    width, height, is_resized = self.extract_image_dimensions(prev_line, image_binary)
-                    width, height = self.fit_to_viewport(viewport_width, width, height)
-                    self.render_image(
-                        hr,
-                        image_binary,
-                        width,
-                        height,
-                        len(line_text) - len(line_text.lstrip()),
-                        is_resized)
+                self.handle_unsafe_render(images)
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
@@ -1094,6 +1072,109 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         return width, height
 
 
+    def get_image_binary(self, image: CachedImage, cwd: str) -> Optional[bytes]:
+        """
+        Retrieve image binary from one of the keys provided by the 
+        CachedImage object.
+        """
+        resolved_url = None
+        if image.get('resolved_url'):
+            resolved_url = image['resolved_url']
+        elif image.get('original_url'):
+            url = image.get('original_url')
+            resolved_url = resolve_local(url, cwd)
+        elif image.get('region'):
+            tuple_region = image.get('region')
+            if type(tuple_region) is tuple:
+                region = Region(*tuple_region)
+                url = self.view.substr(region)
+                resolved_url = resolve_local(url, cwd)
+        return ImageCache.get(resolved_url)
+
+
+    def handle_rescan_render(
+        self,
+        tuple_region: Optional[Tuple[int, int]],
+        images: List[CachedImage] = [],
+    ) -> None:
+        """
+        Rescan the region before rendering.
+        """
+        selected_region = Region(*tuple_region)
+        lines = lines_from_region(self.view, selected_region)
+        viewport_width, _ = self.view.viewport_extent()
+        image_dict = self.to_resolved_url_dict(images)
+        original_urls = image_dict.keys()
+        href_regions = find_by_selector_in_region(
+            self.view, 
+            selected_region, 
+            SELECTOR_ORG_LINK_TEXT_HREF)
+        for region in href_regions:
+            url = self.view.substr(region)
+            line_region = self.view.line(region)
+            line_text = self.view.substr(line_region)
+            index = lines.index(line_text)
+            preceding_line = lines[index - 1] if index > 0 else None
+            resolved_url = image_dict.get(url)
+            image_binary = ImageCache.get(resolved_url)
+            indent_level = len(line_text) - len(line_text.lstrip())
+            if not url in original_urls or not image_binary:
+                continue
+            width, height, is_resized = self.extract_image_dimensions(
+                preceding_line,
+                image_binary)
+            width, height = self.fit_to_viewport(
+                viewport_width,
+                width,
+                height)
+            self.render_image(
+                region,
+                image_binary,
+                width,
+                height,
+                indent_level,
+                is_resized)
+
+
+    def handle_unsafe_render(
+        self,
+        images: List[CachedImage] = []
+    ) -> None:
+        """
+        Render without rescanning but requires regions where the image 
+        urls are located.
+        """
+        entire = Region(0, self.view.size())
+        lines = lines_from_region(self.view, entire)
+        cwd = get_cwd(self.view)
+        viewport_width, _ = self.view.viewport_extent()
+        for image in images:
+            tuple_region = image.get('region')
+            image_binary = self.get_image_binary(image, cwd)
+            if not image_binary or not tuple_region:
+                continue
+            region = Region(*tuple_region)
+            line_region = self.view.line(region)
+            line_text = self.view.substr(line_region)
+            index = lines.index(line_text)
+            preceding_line = lines[index - 1] if index > 0 else None
+            indent_level = len(line_text) - len(line_text.lstrip())
+            width, height, is_resized = self.extract_image_dimensions(
+                preceding_line, 
+                image_binary)
+            width, height = self.fit_to_viewport(
+                viewport_width, 
+                width, 
+                height)
+            self.render_image(
+                region,
+                image_binary,
+                width,
+                height,
+                indent_level,
+                is_resized)
+
+
     def render_image(
         self,
         image_region: Region,
@@ -1109,7 +1190,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             width, height = int(image_width), int(image_height)
             image_format = image_format_of(image_binary)
             space_indent = '&nbsp;' * (indent_level * 2)
-            pm = PhantomsManager.use(self.view)
+            pm = PhantomsManager.of(self.view)
             if image_format == 'svg':
                 html = image_to_string(image_binary)
             else:
@@ -1136,9 +1217,9 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
 
     def to_resolved_url_dict(self, images: List[CachedImage]) -> Dict[str, str]:
         """
-        Converting a list of images into a dict that we can use the current 
-        relative link to quickly get the corresponding resolved absolute 
-        link.
+        Converting a list of images into a dictionary, allowing us to 
+        quickly retrieve the corresponding resolved absolute link using 
+        the current relative link.
         """
         resolved_url_dict = dict()
         for image in images:
@@ -1155,4 +1236,3 @@ class ThreadTermination(Exception):
     reason.
     """
     pass
-    

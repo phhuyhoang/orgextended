@@ -409,7 +409,14 @@ class PhantomsManager:
         return view.id() in cls.hub
 
     @classmethod
-    def use(cls, view: sublime.View) -> 'PhantomsManager':
+    def adopt(cls, view: sublime.View) -> 'PhantomsManager':
+        """
+        Alias of '.of'
+        """
+        return cls.of(view)
+
+    @classmethod
+    def of(cls, view: sublime.View) -> 'PhantomsManager':
         """
         Add the current view into centrally manage context and return
         the newly PM if there aren't. Otherwise, return the 
