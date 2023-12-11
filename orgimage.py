@@ -429,7 +429,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         """
         Show images upon unfolding a section.
         """
-        if command != 'org_tab_cycling':
+        if command == 'org_tab_cycling':
             lazyload_images = settings.Get(SETTING_USE_LAZYLOAD, False)
             if not lazyload_images:
                 return None
@@ -492,7 +492,6 @@ class OrgExtraImage(sublime_plugin.EventListener):
         if not view_states.get('initialized') == True:
             view_states['initialized'] = True
             view_states['prev_action'] = default_action
-        cls.kickstart_phantom_manager(view)
 
 
     def autoload(self, view: View) -> None:
@@ -510,6 +509,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
             return None
         try:
             inbuffer_startup = self.get_inbuffer_startup(view)
+            self.kickstart_phantom_manager(view)
             if startup('inlineimages') in inbuffer_startup:
                 view.run_command(COMMAND_SHOW_IMAGES, { 'region_range': 'all' })
         except Exception as error:
