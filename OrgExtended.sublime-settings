@@ -402,4 +402,12 @@
     // Enabling this option will force the image to render as soon as 
     // it's fully downloaded.
     "extra.image.instantRender": false,
+    // The scaling factor used to calculate the final output size in pixel 
+    // of images specified in relative units (%, vw, vh).
+    // Examples:
+    // - Default:
+    //   width_in_px = 50% (image width) * 802px (viewport width) = 401px
+    // - Set to 0.8:
+    //   width_in_px = 50% (image width) * 802px (viewport width) * 0.8 (scale) = 320.8px
+    "extra.image.viewportScale": 1,
 }

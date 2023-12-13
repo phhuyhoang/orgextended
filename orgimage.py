@@ -87,6 +87,7 @@ SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
 
 SETTING_INSTANT_RENDER = 'extra.image.instantRender'
 SETTING_USE_LAZYLOAD = 'extra.image.useLazyload'
+SETTING_VIEWPORT_SCALE = 'extra.image.viewportScale'
 
 REGEX_ORG_ATTR = re.compile(r":(\w+)\s([\d\.]+)([\w%]*)")
 REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
@@ -231,6 +232,7 @@ def extract_dimensions_from_attrs(
     """
     Extract width and height in px from the #+ORG_ATTR line above a link.
     """
+    viewport_scale = settings.Get(SETTING_VIEWPORT_SCALE, 1)
     try:
         attributes = re.findall(REGEX_ORG_ATTR, textline)
         width, height = default_width, default_height
@@ -238,9 +240,19 @@ def extract_dimensions_from_attrs(
             for attribute in attributes:
                 key, value, unit = attribute
                 if key == 'width':
-                    width = convert_length_to_px(view, value, unit, 'width')
+                    width = convert_length_to_px(
+                        view, 
+                        value, 
+                        unit, 
+                        'width', 
+                        viewport_scale)
                 elif key == 'height':
-                    height = convert_length_to_px(view, value, unit, 'height')
+                    height = convert_length_to_px(
+                        view, 
+                        value, 
+                        unit, 
+                        'height',
+                        viewport_scale)
         return width, height
     except Exception as error:
         print(error)

@@ -37,7 +37,8 @@ def convert_length_to_px(
     view: sublime.View, 
     value: Union[str, int, float],
     unit: SupportedLengthUnit = None,
-    dtype: DimensionType = 'width') -> float:
+    dtype: DimensionType = 'width',
+    scale: Optional[float] = 1.0) -> float:
     """
     Supports converting some length units to pixels (px).\n
     - Absolute units: cm, mm, in, pc, pt, px
@@ -56,13 +57,13 @@ def convert_length_to_px(
     if not unit or unit == 'px':
         return float(value)
     elif unit == '%' and dtype == 'width':
-        return vw * float(value) / 100
+        return vw * float(value) / 100 * scale
     elif unit == '%' and dtype == 'height':
-        return vh * float(value) / 100
+        return vh * float(value) / 100 * scale
     elif unit == 'vw':
-        return vw * float(value)
+        return vw * float(value) * scale
     elif unit == 'vh':
-        return vh * float(value)
+        return vh * float(value) * scale
     elif unit == 'rem':
         font_size = view.settings().get('font_size', 10)
         return float(font_size) * float(value)
