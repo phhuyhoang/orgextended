@@ -182,9 +182,11 @@ def context_data(view: View) -> ViewStates:
     """
     view_state = ContextData.use(view)
     # We should set the states default here
-    if len(view_state) == 0:
+    if 'initialized' not in view_state:
         view_state['initialized'] = False
+    if 'prev_action' not in view_state:
         view_state['prev_action'] = ''
+    if 'viewport_extent' not in view_state:
         view_state['viewport_extent'] = view.viewport_extent()
     return view_state
 
