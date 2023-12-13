@@ -70,7 +70,6 @@ from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
 from OrgExtended.orgutil.util import at, is_iterable, safe_call, shallow_flatten, split_into_chunks
 
 DEFAULT_POOL_SIZE = 10
-ONE_SECOND = 1000
 STATUS_ID = 'orgextra_image'
 
 ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
@@ -119,6 +118,12 @@ CachedImage = TypedDict('CachedImage', {
     'resolved_url': str,
     'size': Optional[str],
     'region': Optional[str],
+})
+PhantomRefData = TypedDict('PhantomRefData', {
+    'width': float,
+    'height': float,
+    'with_attr': bool,
+    'is_hidden': bool,
 })
 OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
 OnErrorHandler = Callable[[str], None]
