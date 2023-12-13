@@ -203,7 +203,7 @@
 
     // Extra
     {
-        "caption": "Org Extra: Show Folding Images",
+        "caption": "Org Extra: Show Section Images",
         "command": "org_extra_show_images", 
         "args": {
             "region_range": "folding"
@@ -212,6 +212,24 @@
     {
         "caption": "Org Extra: Show All Images",
         "command": "org_extra_show_images",
+        "args": {
+            "region_range": "all"
+        }
+    },
+    {
+        "caption": "Org Extra: Hide This Image",
+        "command": "org_extra_hide_this_image",
+    },
+    {
+        "caption": "Org Extra: Hide Section Images",
+        "command": "org_extra_hide_images",
+        "args": {
+            "region_range": "folding"
+        }
+    },
+    {
+        "caption": "Org Extra: Hide All Images",
+        "command": "org_extra_hide_images",
         "args": {
             "region_range": "all"
         }

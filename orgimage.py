@@ -77,6 +77,8 @@ emitter = EventEmitter()
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
+COMMAND_HIDE_THIS_IMAGE = 'org_extra_hide_this_image'
+COMMAND_HIDE_IMAGES = 'org_extra_hide_images'
 
 EVENT_VIEWPORT_RESIZE = EventSymbol('viewport resize')
 
@@ -406,6 +408,21 @@ def resolve_remote(filepath: str, cwd: str = '') -> str:
     return ''
 
 
+def select_region(view: View, render_range: RegionRange) -> Region:
+    """
+    Select the appropriate region based on the given range 
+    (folding or all)
+    """
+    if render_range == 'pre-section':
+        prev_, next_ = find_headings_around_cursor(view, Region(0, 0))
+        return select_region('all') if not next_ else region_between(view, Region(0, 0), next_)
+    if render_range == 'folding':
+        cursor_region = get_cursor_region(view)
+        prev_, next_ = find_headings_around_cursor(view, cursor_region)
+        return region_between(view, prev_, next_)
+    return Region(0, view.size())
+
+
 def with_dimension_attributes(view: View, region: Region) -> bool:
     """
     Return True if a region line contains an ORG_ATTR comment
@@ -483,6 +500,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
                 args = { 
                     'region_range': 'auto', 
                     'no_download': True, 
+                    'show_hidden': False,
                 }
             )
             self.set_action(view, 'save')
@@ -599,6 +617,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         edit, 
         region_range: RegionRange = 'folding',
         no_download: bool = False,
+        show_hidden: bool = True,
     ):
         view = self.view
         try:
@@ -608,9 +627,11 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if region_range == 'auto':
                 region_range = detect_region_range(view)
 
-            selected_region = self.select_region(region_range)
+            selected_region = select_region(view, region_range)
             image_regions = collect_image_regions(view, selected_region)
-            dimension_changed, phantomless = self.ignore_unchanged(image_regions)
+            dimension_changed, phantomless = self.ignore_unchanged(
+                image_regions,
+                show_hidden)
             image_regions = dimension_changed + phantomless
 
             # Load images in a scratch buffer view (remote .org file) in
@@ -736,7 +757,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             }
         )
 
-    def ignore_unchanged(self, regions: List[Region]) -> Tuple[List[Region], List[Region]]:
+    def ignore_unchanged(
+        self, 
+        regions: List[Region],
+        show_hidden: bool = True) -> Tuple[List[Region], List[Region]]:
         """
         Filter out the regions that have already been rendered by 
         checking their existence in PhantomsManager. There are some 
@@ -762,6 +786,11 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             last_data = pm.get_data_by_pid(last_pid) or {}
             upper_line_region = lines[index - 1]
             attr_state = with_dimension_attributes(self.view, upper_line_region)
+
+            if last_data.get('is_hidden') == True:
+                if show_hidden:
+                    phantomless_regions.append(region)
+                continue
 
             # Re-render if the ORG_ATTR line was added or removed
             if attr_state != last_data.get('with_attr', False):
@@ -917,21 +946,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return results
 
 
-    def select_region(self, render_range: RegionRange) -> Region:
-        """
-        Select the appropriate region based on the given range 
-        (folding or all)
-        """
-        if render_range == 'pre-section':
-            prev_, next_ = find_headings_around_cursor(self.view, Region(0, 0))
-            return self.select_region('all') if not next_ else region_between(self.view, Region(0, 0), next_)
-        if render_range == 'folding':
-            cursor_region = get_cursor_region(self.view)
-            prev_, next_ = find_headings_around_cursor(self.view, cursor_region)
-            return region_between(self.view, prev_, next_)
-        return Region(0, self.view.size())
-
-
     def prioritize_cached(self, urls: List[str], cwd: str) -> Tuple[Set[str], Set[str]]:
         """
         Separate the cached images from those that should be downloaded 
@@ -1003,6 +1017,100 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             finish_message = 'Done! Rendering the view...',
             total_count = total_count,
             update_interval = update_interval)
+
+
+
+class OrgExtraHideThisImageCommand(sublime_plugin.TextCommand):
+    """
+    Hide the image in the region specified by `image_region`. If this 
+    parameter is not provided, automatically expand to a 
+    `orgmode.link.text.href` scope around the cursor if exist.
+    Essentially, this command is similar to the legacy `org_hide_image` 
+    command, except that it only hides images that are being managed by 
+    PhantomsManager.
+    Furthermore, even though those images is hidden from view, the phantoms 
+    containing those images are still retained (which is why you see the 
+    next line looks a little bulged, about 1-2px). This helps the 
+    `show_images` command distinguish between hidden images and newly 
+    added/phantomless images through the attached `is_hidden` flag.
+    """
+    def run(
+        self, 
+        edit, 
+        image_region: Optional[Tuple[int, int]] = [None, None]):
+        view = self.view
+        try:
+            if not matching_context(view):
+                return None
+            begin, end = image_region
+            if type(begin) is int and type(end) is int:
+                region = Region(begin, end)
+                pm = PhantomsManager.of(view)
+                pid = pm.get_pid_by_region(region)
+                if pid is not None:
+                    is_erased = pm.erase_phantom(pid)
+                    if is_erased:
+                        pm.add_phantom(region, '', { 'is_hidden': True })
+            else:
+                sel = view.sel()
+                region = view.expand_to_scope(
+                    sel[0].begin(),
+                    SELECTOR_ORG_LINK_TEXT_HREF)
+                if region is not None:
+                    view.run_command(
+                        COMMAND_HIDE_THIS_IMAGE, { 'image_region': region.to_tuple() })
+        except Exception as error:
+            show_message(error, level = 'error')
+            traceback.print_tb(error.__traceback__)
+
+
+
+class OrgExtraHideImagesCommand(sublime_plugin.TextCommand):
+    """
+    Selecting and hiding images in region.
+    """
+    status_id = STATUS_ID + '_hide'
+    status_duration_in_second = 3
+
+    def run(
+        self,
+        edit,
+        region_range: RegionRange = 'folding'
+    ):
+        view = self.view
+        try:
+            if not matching_context(view):
+                return None
+
+            if region_range == 'auto':
+                region_range = detect_region_range(view)
+
+            pm = PhantomsManager.of(view)
+            selected_region = select_region(view, region_range)
+            image_regions = collect_image_regions(view, selected_region)
+            erased_count = 0
+            for region in image_regions:
+                pid = pm.get_pid_by_region(region)
+                if pid is not None:
+                    data = pm.get_data_by_pid(pid)
+                    if data.get('is_hidden'):
+                        continue
+                    is_erased = pm.erase_phantom(pid)
+                    if is_erased:
+                        erased_count += 1
+                        pm.add_phantom(region, '', { 'is_hidden': True })
+
+            if erased_count > 0:
+                set_temporary_status(
+                    view,
+                    self.status_id,
+                    ('Success! {} image is now hidden' \
+                        if erased_count == 1 \
+                        else 'Success! {} images are now hidden').format(erased_count),
+                    self.status_duration_in_second)
+        except Exception as error:
+            show_message(error, level = 'error')
+            traceback.print_tb(error.__traceback__)
 
 
 
