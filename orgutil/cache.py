@@ -21,9 +21,16 @@ class ConstrainedCache:
     hub = dict()
 
     def __init__(self, name: str) -> None:
+        self.FLAG_AUTOFREEUP_ON_SET = object()
+        self.FLAG_ALLOW_ACCESS_STORE = object()
+
         self.__name = name
         self.__cache = dict()
-        self.__max_size = float('inf')
+        self.__max_size = float('inf')   
+        self.__flags = dict()     
+
+        self.__flags[self.FLAG_AUTOFREEUP_ON_SET] = True
+        self.__flags[self.FLAG_ALLOW_ACCESS_STORE] = True
 
     @property
     def name(self) -> str:
@@ -33,10 +40,12 @@ class ConstrainedCache:
         return self.__name
 
     @property
-    def cache(self) -> Dict:
+    def cache(self) -> Union[Dict, None]:
         """
         The internal caching data store
         """
+        if not self.get_flag(self.FLAG_ALLOW_ACCESS_STORE):
+            raise Exception('You cannot direct access this cache')
         return self.__cache
 
     @property
@@ -62,6 +71,13 @@ class ConstrainedCache:
         """
         return self.cache.get(key)
 
+    def get_flag(self, flag: object) -> Any:
+        """
+        Gets the flag value.
+        """
+        if flag in self.__flags:
+            return self.__flags[flag]
+
     def has(self, key: str) -> bool:
         """
         Return a boolean indicating whether the cache has a specified
@@ -75,8 +91,17 @@ class ConstrainedCache:
         accessed later by the corresponding key.
         """
         # Automatically flush the cache if it reaches the limit
-        self.autofreeup()
+        if self.get_flag(self.FLAG_AUTOFREEUP_ON_SET) == True:
+            self.autofreeup()
         self.cache[key] = value
+        return self
+
+    def set_flag(self, flag: object, value: Any) -> 'ConstrainedCache':
+        """
+        Sets the flag.
+        """
+        if flag in self.__flags:
+            self.__flags[flag] = value
         return self
 
     def size(self) -> int:

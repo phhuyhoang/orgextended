@@ -410,4 +410,8 @@
     // - Set to 0.8:
     //   width_in_px = 50% (image width) * 802px (viewport width) * 0.8 (scale) = 320.8px
     "extra.image.viewportScale": 1,
+    // The amount of allocated RAM for caching image binaries 
+    // facilitating instant image loading. Automatically delete all 
+    // cached images if it exceeds this limit (Default size: 100 MB)
+    "extra.image.cacheSize": 104857600,
 }

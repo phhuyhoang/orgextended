@@ -70,10 +70,11 @@ from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
 from OrgExtended.orgutil.util import at, is_iterable, safe_call, shallow_flatten, split_into_chunks
 
 DEFAULT_POOL_SIZE = 10
+DEFAULT_CACHE_SIZE = 100 * 1024 * 1024      # 100 MB
+MIN_CACHE_SIZE = 2 * 1024 * 1024            # 2 MB
 STATUS_ID = 'orgextra_image'
-
-ImageCache = ConstrainedCache.use('image', max_size = 100 * 1024 * 1024) # 100 MB
-emitter = EventEmitter()
+ON_CHANGE_KEY = 'orgextra_image'
+SETTING_FILENAME = settings.configFilename + ".sublime-settings"
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
@@ -89,6 +90,7 @@ SELECTOR_ORG_LINK_TEXT_HREF = 'orgmode.link.text.href'
 SETTING_INSTANT_RENDER = 'extra.image.instantRender'
 SETTING_USE_LAZYLOAD = 'extra.image.useLazyload'
 SETTING_VIEWPORT_SCALE = 'extra.image.viewportScale'
+SETTING_CACHE_SIZE = 'extra.image.cacheSize'
 
 REGEX_ORG_ATTR = re.compile(r":(\w+)\s([\d\.]+)([\w%]*)")
 REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
@@ -106,6 +108,18 @@ LIST_HEADLINE_SELECTORS = [
     'orgmode.headline8',
     'orgmode.headline9',
 ]
+
+
+# Setup
+ImageCache = ConstrainedCache.use('image')
+ImageCache.alloc(DEFAULT_CACHE_SIZE)
+ImageCache.set_flag(ImageCache.FLAG_AUTOFREEUP_ON_SET, False)
+
+emitter = EventEmitter()
+_settings = sublime.load_settings(SETTING_FILENAME)
+
+_settings.clear_on_change(ON_CHANGE_KEY)
+_settings.add_on_change(ON_CHANGE_KEY, lambda: resize_alloc())
 
 
 # Types
@@ -374,6 +388,19 @@ def get_url_from_scratch(view: View) -> str:
     return ''
 
 
+def resize_alloc() -> None:
+    """
+    Adjust the image cache size according to user settings.
+    """
+    amount_alloc = settings.Get(SETTING_CACHE_SIZE, DEFAULT_CACHE_SIZE)
+    if amount_alloc < MIN_CACHE_SIZE:
+        ImageCache.alloc(MIN_CACHE_SIZE)
+        return None
+    if amount_alloc != ImageCache.current_max_size:
+        ImageCache.alloc(int(amount_alloc))
+        return None
+
+
 def resolve_local(url: str, cwd: str = '/') -> str:
     """
     Convert any case of local path to absolute path, ignoring remote url.
@@ -448,6 +475,13 @@ class OrgExtraImage(sublime_plugin.EventListener):
     """
     Event handlers
     """
+    def on_init(self, views) -> None:
+        """
+        Adjust the image cache size according to user settings.
+        """
+        resize_alloc()
+
+
     def on_activated(self, view: View) -> None:
         """
         Reworked the show images on startup feature with performance
@@ -623,6 +657,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         try:
             if not matching_context(view):
                 return None
+
+            # Manually check and release the image cache to ensure
+            # there are enough memory space
+            ImageCache.autofreeup()
             
             if region_range == 'auto':
                 region_range = detect_region_range(view)
