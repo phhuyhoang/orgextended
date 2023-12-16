@@ -1,5 +1,5 @@
 import threading
-from typing import Any, Callable, Iterable, List, Mapping, Union
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Union
 
 
 nil = lambda: None
@@ -7,14 +7,19 @@ nil = lambda: None
 Timeout = Union[float, None]
 
 
-def batch_pools(pools: List[Callable], timeout: Timeout = None) -> List[Any]:
+def batch_pools(
+    pools: List[Callable], 
+    name: Optional[str] = None,
+    timeout: Timeout = None) -> List[Any]:
     """
     Run a list of callbacks in separate threads and then return a list 
     contains their results in order
     """
     threads = []
     for callback in pools:
-        thread = Thread(target = callback if callable(callback) else nil)
+        thread = Thread(
+            name = name,
+            target = callback if callable(callback) else nil)
         thread.start()
         threads.append(thread)
     return [t.join(timeout) for t in threads]
@@ -23,6 +28,7 @@ def batch_pools(pools: List[Callable], timeout: Timeout = None) -> List[Any]:
 def starmap_pools(
     callback: Callable, 
     args: List[Any] = [],
+    name: Optional[str] = None,
     timeout: Timeout = None) -> List[Any]:
     """
     Run the same callback on every argument in separate threads and then
@@ -30,7 +36,9 @@ def starmap_pools(
     """
     threads = []
     for arg in args:
-        thread = Thread(target = lambda p = arg: callback(p))
+        thread = Thread(
+            name = name,
+            target = lambda p = arg: callback(p))
         thread.start()
         threads.append(thread)
     return [t.join() for t in threads]

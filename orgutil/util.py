@@ -10,7 +10,7 @@ import logging
 
 from time import gmtime, strftime
 from inspect import signature
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 from OrgExtended.orgutil.addmethod import *
 
 log = logging.getLogger(__name__)
@@ -378,3 +378,29 @@ def split_into_chunks(array: List, n: int) -> List:
             si = (d+1)*(i if i < r else r) + d*(0 if i < r else i - r)
             yield l[si:si+(d+1 if i < r else d)]
     return compact(list(_chunks(array, n)))
+
+
+def download_binary(
+    url: str, 
+    timeout: Optional[float] = None,
+    chunk_size: Optional[int] = 1 * 1024,
+    termination_hook: Optional[
+        Callable[[], bool
+        ]
+    ] = None
+) -> bytes:
+    """
+    Download a file, supporting termination
+    """
+    response = urllib.request.urlopen(url, timeout = timeout)
+    data = b''
+    chunk_size = chunk_size if termination_hook else None
+    terminated = termination_hook \
+        if callable(termination_hook) \
+        else (lambda: False)
+    while not terminated():
+        chunk = response.read(chunk_size)
+        if not chunk:
+            break
+        data += chunk
+    return data

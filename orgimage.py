@@ -67,12 +67,20 @@ from OrgExtended.orgutil.sublime_utils import (
 )
 from OrgExtended.orgutil.threads import starmap_pools
 from OrgExtended.orgutil.typecompat import Literal, Point, TypedDict
-from OrgExtended.orgutil.util import at, is_iterable, safe_call, shallow_flatten, split_into_chunks
+from OrgExtended.orgutil.util import (
+    at, 
+    download_binary, 
+    is_iterable, 
+    safe_call, 
+    shallow_flatten, 
+    split_into_chunks
+)
 
 DEFAULT_POOL_SIZE = 10
 DEFAULT_CACHE_SIZE = 100 * 1024 * 1024      # 100 MB
 MIN_CACHE_SIZE = 2 * 1024 * 1024            # 2 MB
 STATUS_ID = 'orgextra_image'
+THREAD_NAME = 'orgextra_images'
 ON_CHANGE_KEY = 'orgextra_image'
 SETTING_FILENAME = settings.configFilename + ".sublime-settings"
 
@@ -286,7 +294,9 @@ def extract_dimensions_from_attrs(
 def fetch_or_load_image(
     url: str, 
     cwd: str, 
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
+    chunk_size: Optional[int] = None,
+    termination_hook: Optional[Callable[[], bool]] = None,
 ) -> Optional[bytes]:
     """
     Remote fetch or load from local the image binary based on the 
@@ -300,12 +310,20 @@ def fetch_or_load_image(
         if cwd.startswith('http:') or cwd.startswith('https:'):
             relative_path = url
             absolute_url = resolve_remote(relative_path, cwd)
-            response = urllib.request.urlopen(absolute_url)
-            return response.read()
+            response = download_binary(
+                absolute_url,
+                timeout,
+                chunk_size,
+                termination_hook)
+            return response
         # Handle the case of the provided url is already absolute
         elif url.startswith('http:') or url.startswith('https'):
-            response = urllib.request.urlopen(url)
-            return response.read()
+            response = download_binary(
+                url,
+                timeout,
+                chunk_size,
+                termination_hook)
+            return response
         # Handle the case of the provided url is a local file path
         else:
             relative_path = url
@@ -973,14 +991,15 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         on_error, 
                         timeout,
                         flag),
-                    pools
+                    pools,
+                    name = THREAD_NAME
                 ))
             if callable(on_finish):
                 safe_call(on_finish, [results, default_timer() - start])
         except:
             results = []
         finally:
-            emitter.off(pre_close, listener)
+            emitter.clear_listeners(pre_close)
         return results
 
 
@@ -1015,10 +1034,10 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         are ready for rendering.
         """
         loaded_images = []
+        termination_hook = lambda: stop_event.is_set() \
+            if isinstance(stop_event, threading.Event) \
+            else None
         for url in urls:
-            if isinstance(stop_event, threading.Event):
-                if stop_event.is_set():
-                    raise ThreadTermination()
             resolved_url = resolve_local(url, cwd)
             loaded_binary = None
             cached_binary = ImageCache.get(resolved_url)
@@ -1027,11 +1046,18 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 loaded_image = cached_image(url, resolved_url, len(loaded_binary))
                 loaded_images.append(loaded_image)
             else:
-                loaded_binary = fetch_or_load_image(url, cwd, timeout)
+                loaded_binary = fetch_or_load_image(
+                    url, 
+                    cwd, 
+                    timeout,
+                    termination_hook = termination_hook)
                 loaded_image = cached_image(url, resolved_url, len(loaded_binary or ''))
                 loaded_images.append(loaded_image)
                 if type(loaded_binary) is bytes:
                     ImageCache.set(resolved_url, loaded_binary)
+            if isinstance(stop_event, threading.Event):
+                if stop_event.is_set():
+                    raise ThreadTermination()
             if loaded_binary is None and callable(on_error):
                 safe_call(on_error, [url])
             elif callable(on_data):
