@@ -644,10 +644,10 @@ class ContextData(object):
         return vid in cls.hub
 
     @classmethod
-    def use(cls, view: sublime.View, default: Any = {}) -> Any:
+    def use(cls, view: sublime.View, default: Any = None) -> Any:
         vid = view.id()
         if not cls.available_for(view):
-            cls.hub[vid] = default
+            cls.hub[vid] = default if default is not None else {}
         return cls.hub[vid]
 
     @classmethod
