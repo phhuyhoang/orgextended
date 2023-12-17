@@ -146,11 +146,12 @@ CachedImage = TypedDict('CachedImage', {
     'original_url': Optional[str],
     'resolved_url': str,
     'size': Optional[str],
-    'region': Optional[str],
+    'region': Optional[Tuple[int, int]],
 })
 Event = Literal[
     'pre_close',
     'render',
+    'render_error',
     'render_finish'
 ]
 PhantomRefData = TypedDict('PhantomRefData', {
@@ -207,13 +208,18 @@ def event_factory(event: Event, view: Optional[View] = None) -> str:
     return event + suffix
 
 
-def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
+def cached_image(url: str, rurl: str, size: int = 0, region: Tuple[int, int] = None) -> CachedImage:
     """
     Return an object can be used to transfer between commands when one 
     needs to signal to the others that the image has been loaded and 
     cached on memory.
     """
-    return { 'original_url': url, 'resolved_url': rurl, 'data_size': size }
+    return { 
+        'original_url': url, 
+        'resolved_url': rurl, 
+        'data_size': size,
+        'region': list(region) if type(region) is tuple else region
+    }
 
 
 def context_data(view: View) -> ViewStates:
@@ -380,6 +386,59 @@ def find_headings_around_cursor(
         next_ = slice_regions(regions, begin = begin + 1)
         prev, next = at(prev_, -1), at(next_, 0)
     return prev, next
+
+
+def ignore_unchanged(
+    view: View,
+    regions: List[Region],
+    show_hidden: bool = True) -> Tuple[List[Region], List[Region]]:
+    """
+    Filter out the regions that have already been rendered by 
+    checking their existence in PhantomsManager. There are some 
+    exceptions that will be included by the filter for re-rendering:
+    - When ORG_ATTR has been added or removed.
+    - When the :width or :height values of ORG_ATTR have changed.
+    """
+    pm = PhantomsManager.of(view)
+    lines = view.lines(Region(0, view.size()))
+    rendered_regions = pm.get_all_overseeing_regions()
+    phantomless_regions = []
+    dimension_changed_regions = []
+    for region in regions:
+        if region not in rendered_regions:
+            phantomless_regions.append(region)
+            continue
+
+        current_line = view.line(region)
+        index = lines.index(current_line)
+        if index < 0:
+            return dimension_changed_regions, phantomless_regions
+        last_pid = pm.get_pid_by_region(region)
+        last_data = pm.get_data_by_pid(last_pid) or {}
+        upper_line_region = lines[index - 1]
+        attr_state = with_dimension_attributes(view, upper_line_region)
+
+        if last_data.get('is_hidden') == True:
+            if show_hidden:
+                phantomless_regions.append(region)
+            continue
+
+        # Re-render if the ORG_ATTR line was added or removed
+        if attr_state != last_data.get('with_attr', False):
+            dimension_changed_regions.append(region)
+
+        # Re-render if the ORG_ATTR got the image width or height change
+        elif attr_state == last_data.get('with_attr') == True:
+            width, height = extract_dimensions_from_attrs(
+                view,
+                view.substr(upper_line_region),
+                default_width = last_data.get('width', -1),
+                default_height = last_data.get('height', -1)
+            )
+            if width != last_data.get('width') or height != last_data.get('height'):
+                dimension_changed_regions.append(region)
+
+    return dimension_changed_regions, phantomless_regions
 
 
 def is_folding_section(view: View) -> bool:
@@ -551,20 +610,54 @@ class OrgExtraImage(sublime_plugin.EventListener):
             return None
         if not PhantomsManager.is_being_managed(view):
             return None
-        region_range = detect_region_range(view)
-        prohibit_range = LIST_OUTSIDE_SECTION_REGION_RANGES
-        inbuffer_startup = self.get_inbuffer_startup(view)
-        # We should not render things outside the folding section if the 
-        # STARTUP: inlineimages is not set, unless you unfolded something
-        if region_range in prohibit_range and startup('inlineimages') not in inbuffer_startup:
-            return None
         current_status = view.get_status(STATUS_ID)
-        # If the last action is `save`, that's ok to render the image again
-        if not current_status or self.get_previous_action(view) == 'save':
-            view.run_command(COMMAND_SHOW_IMAGES, 
-                args = { 
-                    'region_range': 'auto', 
-                    'no_download': True, 
+        dimension_changed = self.collect_dimension_changed(
+            view,
+            show_hidden = False)
+
+        if len(dimension_changed) > 0:
+            def render_error_handler(value: Any, error: Exception):
+                if value == listener_id:
+                    emitter.off(render_error, render_error_handler)
+                    render_finish_handler(value)
+
+            def render_finish_handler(value: Any):
+                if value == listener_id:
+                    view.set_read_only(False)
+                    emitter.off(render_finish, render_finish_handler)
+
+            region_range = detect_region_range(view)
+            selected_region = select_region(view, region_range)
+            image_regions = dimension_changed
+            cached_images = []
+            listener_id = uuid4().hex
+            cwd = get_cwd(view)
+            render_error = event_factory('render_error', view)
+            render_finish = event_factory('render_finish', view)
+            for region in image_regions:
+                url = view.substr(region)
+                rurl = resolve_local(url, cwd)
+                ci = cached_image(url, rurl, region = region.to_tuple())
+                cached_images.append(ci)
+            view.set_read_only(True)
+            emitter.once(render_finish, render_finish_handler)
+            view.run_command(COMMAND_RENDER_IMAGES, 
+                args = {
+                    'region': selected_region.to_tuple(),
+                    'images': cached_images,
+                    'emit_args': listener_id,
+                    'rescan': False,
+                    'async_rendering': True,
+                }
+            )
+            self.set_action(view, 'save')
+            return None
+
+        if not current_status:
+            view.run_command(COMMAND_SHOW_IMAGES,
+                args = {
+                    'region_range': 'auto',
+                    'no_download': True,
                     'show_hidden': False,
                 }
             )
@@ -617,6 +710,22 @@ class OrgExtraImage(sublime_plugin.EventListener):
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
+
+
+    @staticmethod
+    def collect_dimension_changed(view: View, show_hidden: bool = False) -> List[Region]:
+        """
+        Collect all cached images that have changed dimensions due to 
+        adjustments in ORG_ATTR
+        """
+        region_range = detect_region_range(view)
+        selected_region = select_region(view, region_range)
+        image_regions = collect_image_regions(view, selected_region)
+        dimension_changed, _ = ignore_unchanged(
+            view,
+            image_regions,
+            show_hidden)
+        return dimension_changed
 
 
     @staticmethod
@@ -698,7 +807,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
 
             selected_region = select_region(view, region_range)
             image_regions = collect_image_regions(view, selected_region)
-            dimension_changed, phantomless = self.ignore_unchanged(
+            dimension_changed, phantomless = ignore_unchanged(
+                view,
                 image_regions,
                 show_hidden)
             image_regions = dimension_changed + phantomless
@@ -710,8 +820,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             # Show a status message: Nothing to render.
             if not image_regions:
                 return self.handle_nothing_changed(status_duration = 3)
-            if len(phantomless):
-                self.create_placeholder_phantoms(phantomless)
 
             urls = self.collect_image_urls(image_regions)
             cached_urls, noncached_urls = self.prioritize_cached(urls, cwd)
@@ -722,6 +830,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     urls = urls,
                     cwd = cwd,
                 )
+            if len(phantomless):
+                self.create_placeholder_phantoms(phantomless)
 
             listener_id = uuid4().hex
             measurement = TimeMeasurement()
@@ -855,58 +965,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 'images': images
             }
         )
-
-    def ignore_unchanged(
-        self, 
-        regions: List[Region],
-        show_hidden: bool = True) -> Tuple[List[Region], List[Region]]:
-        """
-        Filter out the regions that have already been rendered by 
-        checking their existence in PhantomsManager. There are some 
-        exceptions that will be included by the filter for re-rendering:
-        - When ORG_ATTR has been added or removed.
-        - When the :width or :height values of ORG_ATTR have changed.
-        """
-        pm = PhantomsManager.of(self.view)
-        lines = self.view.lines(Region(0, self.view.size()))
-        rendered_regions = pm.get_all_overseeing_regions()
-        phantomless_regions = []
-        dimension_changed_regions = []
-        for region in regions:
-            if region not in rendered_regions:
-                phantomless_regions.append(region)
-                continue
-
-            current_line = self.view.line(region)
-            index = lines.index(current_line)
-            if index < 0:
-                return dimension_changed_regions, phantomless_regions
-            last_pid = pm.get_pid_by_region(region)
-            last_data = pm.get_data_by_pid(last_pid) or {}
-            upper_line_region = lines[index - 1]
-            attr_state = with_dimension_attributes(self.view, upper_line_region)
-
-            if last_data.get('is_hidden') == True:
-                if show_hidden:
-                    phantomless_regions.append(region)
-                continue
-
-            # Re-render if the ORG_ATTR line was added or removed
-            if attr_state != last_data.get('with_attr', False):
-                dimension_changed_regions.append(region)
-
-            # Re-render if the ORG_ATTR got the image width or height change
-            elif attr_state == last_data.get('with_attr') == True:
-                width, height = extract_dimensions_from_attrs(
-                    self.view,
-                    self.view.substr(upper_line_region),
-                    default_width = last_data.get('width', -1),
-                    default_height = last_data.get('height', -1)
-                )
-                if width != last_data.get('width') or height != last_data.get('height'):
-                    dimension_changed_regions.append(region)
-
-        return dimension_changed_regions, phantomless_regions
 
 
     def on_downloaded(
@@ -1399,44 +1457,49 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         """
         Rescan the region before rendering.
         """
-        selected_region = Region(*tuple_region)
-        lines = lines_from_region(self.view, selected_region)
-        viewport_width, _ = self.view.viewport_extent()
-        image_dict = self.to_resolved_url_dict(images)
-        original_urls = image_dict.keys()
-        href_regions = find_by_selector_in_region(
-            self.view, 
-            selected_region, 
-            SELECTOR_ORG_LINK_TEXT_HREF)
         render = event_factory('render', self.view)
+        render_error = event_factory('render_error', self.view)
         render_finish = event_factory('render_finish', self.view)
-        for region in href_regions:
-            url = self.view.substr(region)
-            line_region = self.view.line(region)
-            line_text = self.view.substr(line_region)
-            index = lines.index(line_text)
-            preceding_line = lines[index - 1] if index > 0 else None
-            resolved_url = image_dict.get(url)
-            image_binary = ImageCache.get(resolved_url)
-            indent_level = len(line_text) - len(line_text.lstrip())
-            if not url in original_urls or not image_binary:
-                continue
-            width, height, is_resized = self.extract_image_dimensions(
-                preceding_line,
-                image_binary)
-            width, height = self.fit_to_viewport(
-                viewport_width,
-                width,
-                height)
-            self.render_image(
-                region,
-                image_binary,
-                width,
-                height,
-                indent_level,
-                is_resized)
-            emitter.emit(render, emit_args, region)
-        emitter.emit(render_finish, emit_args)
+        try:
+            selected_region = Region(*tuple_region)
+            lines = lines_from_region(self.view, selected_region)
+            viewport_width, _ = self.view.viewport_extent()
+            image_dict = self.to_resolved_url_dict(images)
+            original_urls = image_dict.keys()
+            href_regions = find_by_selector_in_region(
+                self.view, 
+                selected_region, 
+                SELECTOR_ORG_LINK_TEXT_HREF)
+            for region in href_regions:
+                url = self.view.substr(region)
+                line_region = self.view.line(region)
+                line_text = self.view.substr(line_region)
+                index = lines.index(line_text)
+                preceding_line = lines[index - 1] if index > 0 else None
+                resolved_url = image_dict.get(url)
+                image_binary = ImageCache.get(resolved_url)
+                indent_level = len(line_text) - len(line_text.lstrip())
+                if not url in original_urls or not image_binary:
+                    continue
+                width, height, is_resized = self.extract_image_dimensions(
+                    preceding_line,
+                    image_binary)
+                width, height = self.fit_to_viewport(
+                    viewport_width,
+                    width,
+                    height)
+                self.render_image(
+                    region,
+                    image_binary,
+                    width,
+                    height,
+                    indent_level,
+                    is_resized)
+                emitter.emit(render, emit_args, region)
+            emitter.emit(render_finish, emit_args)
+        except Exception as error:
+            emitter.emit(render_error, emit_args, error)
+            raise error
 
 
     def handle_unsafe_render(
@@ -1448,39 +1511,44 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         Render without rescanning but requires regions where the image 
         urls are located.
         """
-        entire = Region(0, self.view.size())
-        lines = lines_from_region(self.view, entire)
-        cwd = get_cwd(self.view)
-        viewport_width, _ = self.view.viewport_extent()
         render = event_factory('render', self.view)
+        render_error = event_factory('render_error', self.view)
         render_finish = event_factory('render_finish', self.view)
-        for image in images:
-            tuple_region = image.get('region')
-            image_binary = self.get_image_binary(image, cwd)
-            if not image_binary or not tuple_region:
-                continue
-            region = Region(*tuple_region)
-            line_region = self.view.line(region)
-            line_text = self.view.substr(line_region)
-            index = lines.index(line_text)
-            preceding_line = lines[index - 1] if index > 0 else None
-            indent_level = len(line_text) - len(line_text.lstrip())
-            width, height, is_resized = self.extract_image_dimensions(
-                preceding_line, 
-                image_binary)
-            width, height = self.fit_to_viewport(
-                viewport_width, 
-                width, 
-                height)
-            self.render_image(
-                region,
-                image_binary,
-                width,
-                height,
-                indent_level,
-                is_resized)
-            emitter.emit(render, emit_args, region)
-        emitter.emit(render_finish, emit_args)
+        try:
+            entire = Region(0, self.view.size())
+            lines = lines_from_region(self.view, entire)
+            cwd = get_cwd(self.view)
+            viewport_width, _ = self.view.viewport_extent()
+            for image in images:
+                tuple_region = image.get('region')
+                image_binary = self.get_image_binary(image, cwd)
+                if not image_binary or not tuple_region:
+                    continue
+                region = Region(*tuple_region)
+                line_region = self.view.line(region)
+                line_text = self.view.substr(line_region)
+                index = lines.index(line_text)
+                preceding_line = lines[index - 1] if index > 0 else None
+                indent_level = len(line_text) - len(line_text.lstrip())
+                width, height, is_resized = self.extract_image_dimensions(
+                    preceding_line, 
+                    image_binary)
+                width, height = self.fit_to_viewport(
+                    viewport_width, 
+                    width, 
+                    height)
+                self.render_image(
+                    region,
+                    image_binary,
+                    width,
+                    height,
+                    indent_level,
+                    is_resized)
+                emitter.emit(render, emit_args, region)
+            emitter.emit(render_finish, emit_args)
+        except Exception as error:
+            emitter.emit(render_error, emit_args, error)
+            raise error
 
 
     def render_image(
