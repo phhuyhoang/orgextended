@@ -104,6 +104,9 @@ def find_by_selector_in_region(
 ) -> List[sublime.Region]:
     """
     Find by selector within specific region.
+
+    An another approach but cannot guarantee both accuracy and speed:
+    https://forum.sublimetext.com/t/is-there-a-good-way-to-run-find-by-selector-over-a-region-instead-of-the-entire-view/44796
     """
     global_matched = view.find_by_selector(selector)
     regional_matched = slice_regions(global_matched, begin = region.begin(), end = region.end())
@@ -537,18 +540,22 @@ class SublimeStatusIndicator:
         """
         self.view.erase_status(self.name)
 
-    def succeed(self) -> 'SublimeStatusIndicator':
+    def succeed(self, n: int = 1, update: bool = False) -> 'SublimeStatusIndicator':
         """
         Tells the indicator that a unit of work has been succeed.
         """
-        self._counter.succeed += 1
+        self._counter.succeed += n
+        if update and self._started and not self._stopped:
+            self.update_status(self._bar.before, self._bar.after, self.message)
         return self
 
-    def failed(self) -> 'SublimeStatusIndicator':
+    def failed(self, n: int = 1, update: bool = False) -> 'SublimeStatusIndicator':
         """
         Tells the indicator that a unit of work has been failed.
         """
-        self._counter.failed += 1
+        self._counter.failed += n
+        if update and self._started and not self._stopped:
+            self.update_status(self._bar.before, self._bar.after, self.message)
         return self
 
     def autoupdate(self, i: int = 0, move: int = 1) -> None:
@@ -566,11 +573,23 @@ class SublimeStatusIndicator:
         i += move
         self._bar.before = before
         self._bar.after = after
+        self.update_status(before, after, self.message)
+        sublime.set_timeout(lambda: self.autoupdate(i, move), self.update_interval)
+
+    def update_status(
+        self,
+        before: int,
+        after: int,
+        message: Optional[str] = None) -> None:
+        """
+        Aggressively update the status message.
+        """
+        message = message or self.message
         if self._counter.total is not None:
             status_message = '[{}={}] {} [{}✔️/{}❌/{}❔]'.format(
                 ' ' * before,
                 ' ' * after,
-                self.message,
+                message,
                 self._counter.succeed,
                 self._counter.failed,
                 self._counter.total)
@@ -578,9 +597,8 @@ class SublimeStatusIndicator:
             status_message = '[{}={}] {}'.format(
                 ' ' * before, 
                 ' ' * after,
-                self.message)
+                message)
         self.view.set_status(self.name, status_message)
-        sublime.set_timeout(lambda: self.autoupdate(i, move), self.update_interval)
 
     @staticmethod
     def status_counter():

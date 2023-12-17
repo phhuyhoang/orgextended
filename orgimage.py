@@ -34,6 +34,7 @@ import urllib.request
 import OrgExtended.orgdb as db
 import OrgExtended.asettings as settings
 from os import path
+from uuid import uuid4
 from timeit import default_timer
 from sublime import Region, View
 from collections import defaultdict
@@ -90,6 +91,10 @@ COMMAND_HIDE_THIS_IMAGE = 'org_extra_hide_this_image'
 COMMAND_HIDE_IMAGES = 'org_extra_hide_images'
 
 EVENT_VIEWPORT_RESIZE = EventSymbol('viewport resize')
+
+MSG_FETCH_IMAGES = '[{}] Fetching images in the {}...'
+MSG_RENDER_IMAGES = 'Rendering...'
+MSG_DONE = 'Done!'
 
 SELECTOR_ORG_SOURCE = 'text.orgmode'
 SELECTOR_ORG_LINK = 'orgmode.link'
@@ -718,36 +723,66 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     cwd = cwd,
                 )
 
-            status = self.use_status_indicator(region_range, len(urls))
-            status.start()
+            listener_id = uuid4().hex
+            measurement = TimeMeasurement()
+            fetch_status = self.use_fetch_status_indicator(region_range, len(urls))
+            render_status = self.use_render_status_indicator(listener_id, measurement)
+
+            instant_render = settings.Get(SETTING_INSTANT_RENDER, False)
+
+            fetch_status.start()
+            measurement.start_fetch()
 
             if cached_urls:
+                def cache_post_finish_handler(_, timecost: float):
+                    if not noncached_urls:
+                        fetch_status.stop(timecost)
+                        render_status.start()
+                        measurement.start_render()
+
                 # The cached images should ignore the extra.image.instantRender 
                 # setting; otherwise, the main thread will be blocked during file 
                 # rescanning due to multiple render command callbacks. This is the 
                 # cause of the slowness when rendering so much images in a 
                 # large-sized file.
-                sublime.set_timeout_async(
+                safe_call(
                     lambda: self.parallel_requests_using_threads(
                         pools = split_into_chunks(list(cached_urls), DEFAULT_POOL_SIZE),
                         cwd = cwd,
-                        on_data = lambda: status.succeed(),
-                        on_error = lambda: status.failed(),
                         on_finish = self.on_threads_finished(
                             selected_region,
-                            lambda timecost: status.stop(timecost) if not noncached_urls else None
+                            # lambda timecost: fetch_status.stop(timecost) if not noncached_urls else None
+                            emit_args = listener_id,
+                            then = cache_post_finish_handler
                         )
                     )
                 )
+                fetch_status.succeed(len(cached_urls))
+
+            def post_download_handler(image: CachedImage):
+                fetch_status.succeed()
+
+            def post_finish_handler(images: List[CachedImage], timecost: float):
+                fetch_status.stop(timecost)
+                if not instant_render:
+                    render_status.start()
+                    measurement.start_render()
 
             # Download non-cached images
             sublime.set_timeout_async(
                 lambda: self.parallel_requests_using_threads(
                     pools = split_into_chunks(list(noncached_urls), DEFAULT_POOL_SIZE),
                     cwd = cwd,
-                    on_data = self.on_downloaded(selected_region, lambda: status.succeed()),
-                    on_error = lambda: status.failed(),
-                    on_finish = self.on_threads_finished(selected_region, lambda timecost: status.stop(timecost))
+                    on_data = self.on_downloaded(
+                        selected_region, 
+                        post_download_handler,
+                    ),
+                    on_error = lambda: fetch_status.failed(),
+                    on_finish = self.on_threads_finished(
+                        selected_region, 
+                        emit_args = listener_id,
+                        then = post_finish_handler,
+                    )
                 )
             )
                         
@@ -755,8 +790,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             # If all images exceed this time threshold, the status 
             # message below will be set.
             sublime.set_timeout(
-                lambda: status.is_running() \
-                    and status.set('Slow internet! Be patient...'),
+                lambda: fetch_status.is_running() \
+                    and fetch_status.set('Slow internet! Be patient...'),
                 len(urls) * 5 * 1000)
         except Exception as error:
             show_message(error, level = 'error')
@@ -900,7 +935,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     def on_threads_finished(
         self,
         region: Region,
-        then: Optional[Callable[[int], None]] = None
+        then: Optional[Callable[[int], None]] = None,
+        emit_args: Any = None,
     ) -> Callable[[List[CachedImage], int], None]:
         """
         Chaining calls the render command to automatically render the 
@@ -908,11 +944,12 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         def on_finish(cached_images: List[CachedImage], timecost: int):
             if callable(then):
-                safe_call(then, [timecost])
+                safe_call(then, [cached_images, timecost])
             self.view.run_command(COMMAND_RENDER_IMAGES, 
                 args = {
                     'region': region.to_tuple(),
                     'images': cached_images,
+                    'emit_args': emit_args,
                 }
             )
         return on_finish
@@ -1075,7 +1112,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         return loaded_images
 
 
-    def use_status_indicator(
+    def use_fetch_status_indicator(
         self, 
         region_range: RegionRange,
         total_count: Optional[int] = None,
@@ -1085,12 +1122,62 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         Setup a loading indicator with messages on the status bar
         """
         mode = 'inlineimages' if region_range == 'all' else 'unfold'
-        area = 'current document' if region_range == 'all' else 'folding content'
-        return SublimeStatusIndicator(self.view, STATUS_ID,
-            message = '[{}] Fetching image in the {}...'.format(mode, area),
-            finish_message = 'Done! Rendering the view...',
+        area = 'document' if region_range == 'all' else 'folding section'
+        return SublimeStatusIndicator(
+            self.view, 
+            STATUS_ID,
+            message = MSG_FETCH_IMAGES.format(mode, area),
+            finish_message = MSG_RENDER_IMAGES,
             total_count = total_count,
             update_interval = update_interval)
+
+
+    def use_render_status_indicator(
+        self,
+        listener_id: str,
+        measurement: 'TimeMeasurement',
+        update_interval: Optional[int] = 100
+    ) -> SublimeStatusIndicator:
+        """
+        Setup a loading indicator with messages on the status bar
+        """
+        render_message = '{} ({})'
+        finish_message = '{} ({})'
+        status = SublimeStatusIndicator(
+            self.view,
+            STATUS_ID,
+            message = render_message.format(MSG_RENDER_IMAGES, 0),
+            finish_message = finish_message.format(MSG_DONE, 0),
+            update_interval = update_interval)
+        counter = status.status_counter()
+
+        render = event_factory('render', self.view)
+        render_finish = event_factory('render_finish', self.view)
+
+        def render_event_handler(value: Any, image_region: Region):
+            print(value, listener_id)
+            if value == listener_id:
+                counter.succeed += 1
+                status.set(message = render_message.format(MSG_RENDER_IMAGES, counter.succeed))
+                status.succeed(update = True)
+
+        def render_finish_handler(value: Any):
+            if value == listener_id:
+                emitter.clear_listeners(render)
+                emitter.clear_listeners(render_finish)
+                measurement.stop_render()
+                accumulated_timecost = measurement.accumulated_timecost()
+                status.set(
+                    finish_message = finish_message.format(
+                        MSG_DONE,
+                        counter.succeed
+                    )
+                )
+                status.stop(accumulated_timecost)
+
+        emitter.on(render, render_event_handler)
+        emitter.once(render_finish, render_finish_handler)
+        return status
 
 
 
@@ -1219,6 +1306,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         region: Optional[Tuple[int, int]] = None,
         images: List[CachedImage] = [],
         rescan: bool = True,
+        emit_args: Any = None,
         async_rendering: bool = False, 
     ) -> None:
         try:
@@ -1226,9 +1314,12 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 return None
             render = lambda: None
             if rescan:
-                render = lambda: self.handle_rescan_render(region, images)
+                render = lambda: self.handle_rescan_render(
+                    region, 
+                    images,
+                    emit_args)
             else:
-                render = lambda: self.handle_unsafe_render(images)
+                render = lambda: self.handle_unsafe_render(images, emit_args)
             if async_rendering:
                 sublime.set_timeout_async(render)
             else:
@@ -1303,6 +1394,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         self,
         tuple_region: Optional[Tuple[int, int]],
         images: List[CachedImage] = [],
+        emit_args: Any = None,
     ) -> None:
         """
         Rescan the region before rendering.
@@ -1316,6 +1408,8 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             self.view, 
             selected_region, 
             SELECTOR_ORG_LINK_TEXT_HREF)
+        render = event_factory('render', self.view)
+        render_finish = event_factory('render_finish', self.view)
         for region in href_regions:
             url = self.view.substr(region)
             line_region = self.view.line(region)
@@ -1341,11 +1435,14 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 height,
                 indent_level,
                 is_resized)
+            emitter.emit(render, emit_args, region)
+        emitter.emit(render_finish, emit_args)
 
 
     def handle_unsafe_render(
         self,
-        images: List[CachedImage] = []
+        images: List[CachedImage] = [],
+        emit_args: Any = None,
     ) -> None:
         """
         Render without rescanning but requires regions where the image 
@@ -1355,6 +1452,8 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         lines = lines_from_region(self.view, entire)
         cwd = get_cwd(self.view)
         viewport_width, _ = self.view.viewport_extent()
+        render = event_factory('render', self.view)
+        render_finish = event_factory('render_finish', self.view)
         for image in images:
             tuple_region = image.get('region')
             image_binary = self.get_image_binary(image, cwd)
@@ -1380,6 +1479,8 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 height,
                 indent_level,
                 is_resized)
+            emitter.emit(render, emit_args, region)
+        emitter.emit(render_finish, emit_args)
 
 
     def render_image(
@@ -1435,6 +1536,83 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 continue
             resolved_url_dict[original_url] = image.get('resolved_url')
         return resolved_url_dict
+
+
+
+class TimeMeasurement(object):
+    """
+    Calculate the accumulated timecost
+    """
+    def __init__(self) -> None:
+        self.timecost = 0
+        self.fetch_begin = 0
+        self.fetch_end = 0
+        self.render_begin = 0
+        self.render_end = 0
+        self.fetching = False
+        self.rendering = False
+        self.finished = False
+
+    def is_fetching(self) -> bool:
+        return self.fetching
+
+    def is_rendering(self) -> bool:
+        return self.rendering
+
+    def is_lazy(self) -> bool:
+        return not self.fetching and not self.rendering
+
+    def is_finished(self) -> bool:
+        return self.finished
+
+    def start_fetch(self) -> 'TimeMeasurement':
+        if self.fetch_end > 0:
+            return self
+        self.fetch_begin = default_timer()
+        self.fetching = True
+        return self
+
+    def stop_fetch(self) -> 'TimeMeasurement':
+        if self.fetch_end > 0:
+            return self
+        self.fetch_end = default_timer()
+        self.fetching = False
+        self.timecost = self.timecost + (self.fetch_end - self.fetch_begin)
+        return self
+
+    def start_render(self) -> 'TimeMeasurement':
+        self.stop_fetch()
+        if self.render_end > 0:
+            return self
+        self.render_begin = default_timer()
+        self.rendering = True
+        return self
+
+    def stop_render(self) -> 'TimeMeasurement':
+        self.stop_fetch()
+        if self.render_end > 0:
+            return self
+        self.render_end = default_timer()
+        self.rendering = False
+        self.timecost = self.timecost + (self.render_end - self.render_begin)
+        self.finished = True
+        return self
+
+    def fetch_timecost(self) -> float:
+        if self.fetching:
+            return default_timer() - self.fetch_begin
+        return self.fetch_end - self.fetch_begin
+
+    def render_timecost(self) -> float:
+        if self.rendering:
+            return default_timer() - self.render_begin
+        return self.render_end - self.render_begin
+
+    def accumulated_timecost(self) -> float:
+        if self.fetching or self.rendering:
+            return default_timer() - self.fetch_begin
+        return self.timecost
+
 
 
 class ThreadTermination(Exception):
