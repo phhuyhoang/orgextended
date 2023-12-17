@@ -143,6 +143,11 @@ CachedImage = TypedDict('CachedImage', {
     'size': Optional[str],
     'region': Optional[str],
 })
+Event = Literal[
+    'pre_close',
+    'render',
+    'render_finish'
+]
 PhantomRefData = TypedDict('PhantomRefData', {
     'width': float,
     'height': float,
@@ -188,12 +193,13 @@ ViewStates = TypedDict(
 )
 
 
-def pre_close_event(view: View) -> str:
+def event_factory(event: Event, view: Optional[View] = None) -> str:
     """
-    Returns a string that can be used as a key to emit the close event for
-    a specific view.
+    Returns a string that can be used as a key to emit an event for a
+    specific view
     """
-    return 'close_' + str(view.id())
+    suffix = '_{}'.format(view.id()) if view else ''
+    return event + suffix
 
 
 def cached_image(url: str, rurl: str, size: int = 0) -> CachedImage:
@@ -566,7 +572,7 @@ class OrgExtraImage(sublime_plugin.EventListener):
         avoid memory leaks.
         """
         if matching_context(view):
-            pre_close = pre_close_event(view)
+            pre_close = event_factory('pre_close', view)
             emitter.emit(pre_close)
         PhantomsManager.remove(view)
         ContextData.remove(view)
@@ -934,7 +940,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         significantly faster compared to the synchronous approach.
         """
         start = default_timer()
-        stop = pre_close_event(self.view)
+        stop = event_factory('pre_close', self.view)
         flag = threading.Event()
         cached_images = []
         emitter.once(stop, lambda: flag.set())
@@ -980,7 +986,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         start = default_timer()
         flag = threading.Event()
-        pre_close = pre_close_event(self.view)
+        pre_close = event_factory('pre_close', self.view)
         listener = lambda: flag.set()
         emitter.once(pre_close, listener)
         try:
