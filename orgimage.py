@@ -151,8 +151,9 @@ PhantomRefData = TypedDict('PhantomRefData', {
 })
 OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
 OnErrorHandler = Callable[[str], None]
-OnFinishHandler = Callable[[List['CachedImage']], None]
+OnFinishHandler = Callable[[List['CachedImage'], float], None]
 RegionRange = Literal['folding', 'all', 'pre-section', 'auto']
+RenderMethod = Literal['rescan', 'unsafe']
 Startup = Literal[
     "overview",
     "content",
@@ -263,6 +264,7 @@ def extract_dimensions_from_attrs(
     """
     Extract width and height in px from the #+ORG_ATTR line above a link.
     """
+    textline = textline or ''
     viewport_scale = settings.Get(SETTING_VIEWPORT_SCALE, 1)
     try:
         attributes = re.findall(REGEX_ORG_ATTR, textline)
@@ -996,7 +998,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 ))
             if callable(on_finish):
                 safe_call(on_finish, [results, default_timer() - start])
-        except:
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
             results = []
         finally:
             emitter.clear_listeners(pre_close)
