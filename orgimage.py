@@ -1209,14 +1209,20 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         region: Optional[Tuple[int, int]] = None,
         images: List[CachedImage] = [],
         rescan: bool = True,
+        async_rendering: bool = False, 
     ) -> None:
         try:
             if not matching_context(self.view) or not region:
                 return None
+            render = lambda: None
             if rescan:
-                self.handle_rescan_render(region, images)
+                render = lambda: self.handle_rescan_render(region, images)
             else:
-                self.handle_unsafe_render(images)
+                render = lambda: self.handle_unsafe_render(images)
+            if async_rendering:
+                sublime.set_timeout_async(render)
+            else:
+                safe_call(render)
         except Exception as error:
             print(error)
             traceback.print_tb(error.__traceback__)
