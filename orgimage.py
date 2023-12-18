@@ -182,6 +182,11 @@ ViewStates = TypedDict(
     { 
         # Should be `True` from the moment a view gains focus.
         'initialized': bool, 
+        # Indicate a view is downloading images in background. This 
+        # implies that calling the command directly might be unsafe and 
+        # could potentially initiate the reloading of images already in 
+        # the process of being loaded.
+        'is_downloading': bool,
         # Indicates the previous triggered image rendering was based on 
         # which user action. It's necessary to help skip some rendering 
         # steps to achieve instant responsiveness.
@@ -231,6 +236,8 @@ def context_data(view: View) -> ViewStates:
     # We should set the states default here
     if 'initialized' not in view_state:
         view_state['initialized'] = False
+    if 'is_downloading' not in view_state:
+        view_state['is_downloading'] = False
     if 'prev_action' not in view_state:
         view_state['prev_action'] = ''
     if 'viewport_extent' not in view_state:
@@ -792,6 +799,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         region_range: RegionRange = 'folding',
         no_download: bool = False,
         show_hidden: bool = True,
+        image_regions: List[Tuple[int, int]] = [],
     ):
         view = self.view
         try:
@@ -806,7 +814,15 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 region_range = detect_region_range(view)
 
             selected_region = select_region(view, region_range)
-            image_regions = collect_image_regions(view, selected_region)
+            if not image_regions or (type(image_regions) is not list):
+                image_regions = collect_image_regions(view, selected_region)
+            else:
+                image_regions = list(
+                    map(
+                        lambda image_region: Region(*image_region),
+                        image_regions,
+                    )
+                )
             dimension_changed, phantomless = ignore_unchanged(
                 view,
                 image_regions,
@@ -869,6 +885,9 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 )
                 fetch_status.succeed(len(cached_urls))
 
+            view_state = context_data(view)
+            view_state['is_downloading'] = True
+
             def post_download_handler(image: CachedImage):
                 fetch_status.succeed()
 
@@ -877,6 +896,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 if not instant_render:
                     render_status.start()
                     measurement.start_render()
+                view_state['is_downloading'] = False
 
             # Download non-cached images
             sublime.set_timeout_async(
@@ -1236,6 +1256,43 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         emitter.on(render, render_event_handler)
         emitter.once(render_finish, render_finish_handler)
         return status
+
+
+
+class OrgExtraShowThisImageCommand(sublime_plugin.TextCommand):
+    """
+    Show a single image
+    """
+    def run(
+        self,
+        edit,
+        image_region: Optional[Tuple[int, int]] = [None, None]):
+        view = self.view
+        try:
+            if not matching_context(view):
+                return None
+            begin, end = image_region
+            if (type(begin) is not int) or (type(end) is not int):
+                sel = view.sel()
+                region = view.expand_to_scope(
+                    sel[0].begin(),
+                    SELECTOR_ORG_LINK_TEXT_HREF)
+                if region is None:
+                    return None
+                image_region = region.to_tuple()
+            
+            view_state = context_data(view)
+            if not view_state['is_downloading']:
+                return view.run_command(COMMAND_SHOW_IMAGES,
+                    args = {
+                        'region_range': 'auto',
+                        'show_hidden': True,
+                        'image_regions': [image_region]
+                    }
+                )
+        except Exception as error:
+            show_message(error, level = 'error')
+            traceback.print_tb(error.__traceback__)
 
 
 

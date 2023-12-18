@@ -203,6 +203,10 @@
 
     // Extra
     {
+        "caption": "Org Extra: Show This Image",
+        "command": "org_extra_show_this_image"
+    },
+    {
         "caption": "Org Extra: Show Section Images",
         "command": "org_extra_show_images", 
         "args": {
