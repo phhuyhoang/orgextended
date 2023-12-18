@@ -1,6 +1,7 @@
 import sublime
 import sublime_plugin
 import os
+import socket
 import base64
 import urllib.request
 import OrgExtended.asettings as sets 
@@ -10,7 +11,10 @@ import logging
 
 from time import gmtime, strftime
 from inspect import signature
+from threading import Timer, Event
 from typing import Any, Callable, List, Optional, Tuple, Union
+from http.client import HTTPResponse
+from urllib.error import URLError
 from OrgExtended.orgutil.addmethod import *
 
 log = logging.getLogger(__name__)
@@ -380,6 +384,26 @@ def split_into_chunks(array: List, n: int) -> List:
     return compact(list(_chunks(array, n)))
 
 
+def compute_min_download_timeout(
+    tpm: float,
+    filesize: Optional[int] = None,
+    response: Optional[HTTPResponse] = None,
+    request: Optional[urllib.request.Request] = None,
+) -> Union[int, None]:
+    """
+    Estimate download timeout based on file size.
+    """
+    if filesize is None and response is None:
+        return None
+    if filesize is None:
+        if request:
+            filesize = int(request.get_header())
+        elif response:
+            filesize = int(response.getheader('Content-Length', 0))
+    timeout = filesize / (1024 * 1024) * tpm
+    return timeout
+
+
 def download_binary(
     url: str, 
     timeout: Optional[float] = None,
@@ -387,20 +411,33 @@ def download_binary(
     termination_hook: Optional[
         Callable[[], bool
         ]
-    ] = None
+    ] = None,
+    timeout_per_megabyte: Optional[Union[float, int]] = None
 ) -> bytes:
     """
     Download a file, supporting termination
     """
+    tpm = timeout_per_megabyte
     response = urllib.request.urlopen(url, timeout = timeout)
     data = b''
     chunk_size = chunk_size if termination_hook else None
     terminated = termination_hook \
         if callable(termination_hook) \
         else (lambda: False)
+    timed_out = Event()
+    timer = None
+    if type(tpm) is int or type(tpm) is float:
+        min_timeout = compute_min_download_timeout(tpm, response = response)
+        if min_timeout is not None:
+            timer = Timer(min_timeout, lambda: timed_out.set())
+            timer.start()
+    timed_out = Event()
     while not terminated():
+        if timed_out.is_set():
+            raise URLError(socket.timeout('timed out'))
         chunk = response.read(chunk_size)
         if not chunk:
             break
         data += chunk
+    if timer: timer.cancel()
     return data

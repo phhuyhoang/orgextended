@@ -126,6 +126,31 @@ def get_cursor_region(view: sublime.View) -> sublime.Region:
     return sublime.Region(-1, -1)
 
 
+def get_syntax_by_scope(scope: str) -> Union[sublime.Syntax, None]:
+    """
+    Example:
+    ```py
+    get_syntax_by_scope('text.orgmode')
+    # Syntax('Packages/OrgExtended/OrgExtended.sublime-syntax', '', False, 'text.orgmode')
+    ```
+    """
+    syntaxes = sublime.list_syntaxes()
+    for syntax in syntaxes:
+        if syntax.scope == scope:
+            return syntax
+
+
+def get_view_by_id(view_id: int) -> Union[sublime.View, None]:
+    """
+    Gets a view by identifier number.
+    """
+    windows = sublime.windows()
+    for window in windows:
+        for view in window.views():
+            if view.id() == view_id:
+                return view
+
+
 def is_active_plugin(plugin: str) -> bool:
     """
     Check if the given Sublime Text plugin is active based on installed
@@ -145,6 +170,35 @@ def lines_from_region(view: sublime.View, region: sublime.Region) -> List[str]:
     """
     lines = view.lines(region)
     return [view.substr(line) for line in lines]
+
+
+def move_to(
+    view: sublime.View,
+    row: Union[int, None] = None,
+    col: int = 0,
+    extend: int = 0,
+    animate: bool = False,
+) -> None:
+    """
+    Move the cursor to a specified position in the view.
+
+    :param      extend:   Number of characters to extend the selection to the right
+    :param      animate:  Smoothy scroll
+    """
+    if not row:
+        return None
+    text_point = view.text_point(row, col)
+    region = sublime.Region(text_point)
+    view.sel().clear()
+    view.sel().add(region)
+    view.show_at_center(text_point, animate)
+    if extend > 0:
+        line = view.line(region)
+        for _ in range(extend):
+            col += 1
+            if col > len(line):
+                break
+            view.run_command('move', { "by": "characters", "forward": True, "extend": True })
 
 
 def region_between(

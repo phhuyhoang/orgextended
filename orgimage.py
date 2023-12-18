@@ -59,7 +59,10 @@ from OrgExtended.orgutil.sublime_utils import (
     find_by_selectors,
     find_by_selector_in_region,
     get_cursor_region,
-    lines_from_region, 
+    get_syntax_by_scope,
+    get_view_by_id,
+    lines_from_region,
+    move_to, 
     region_between,
     set_temporary_status, 
     show_message,
@@ -80,15 +83,19 @@ from OrgExtended.orgutil.util import (
 DEFAULT_POOL_SIZE = 10
 DEFAULT_CACHE_SIZE = 100 * 1024 * 1024      # 100 MB
 MIN_CACHE_SIZE = 2 * 1024 * 1024            # 2 MB
+MAX_TPM = 9999
 STATUS_ID = 'orgextra_image'
-THREAD_NAME = 'orgextra_images'
+THREAD_NAME = 'orgextra_image'
 ON_CHANGE_KEY = 'orgextra_image'
+ERROR_PANEL_NAME = 'orgextra_image_error'
 SETTING_FILENAME = settings.configFilename + ".sublime-settings"
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
 COMMAND_HIDE_THIS_IMAGE = 'org_extra_hide_this_image'
 COMMAND_HIDE_IMAGES = 'org_extra_hide_images'
+COMMAND_SHOW_ERROR = 'org_extra_image_show_error'
+COMMAND_JUMP_TO_ERROR = 'org_extra_image_jump_to_error'
 
 EVENT_VIEWPORT_RESIZE = EventSymbol('viewport resize')
 
@@ -104,6 +111,8 @@ SETTING_INSTANT_RENDER = 'extra.image.instantRender'
 SETTING_USE_LAZYLOAD = 'extra.image.useLazyload'
 SETTING_VIEWPORT_SCALE = 'extra.image.viewportScale'
 SETTING_CACHE_SIZE = 'extra.image.cacheSize'
+SETTING_DEFAULT_TIMEOUT = 'extra.image.defaultTimeout'
+SETTING_TIMEOUT_PER_MEGABYTE = 'extra.image.timeoutPerMegabyte'
 
 REGEX_ORG_ATTR = re.compile(r":(\w+)\s([\d\.]+)([\w%]*)")
 REGEX_ORG_LINK = re.compile(r"\[\[([^\[\]]+)\]\s*(\[[^\[\]]*\])?\]")
@@ -148,6 +157,12 @@ CachedImage = TypedDict('CachedImage', {
     'size': Optional[str],
     'region': Optional[Tuple[int, int]],
 })
+DLException = Tuple[str, Exception]
+ErrorPanelRef = TypedDict('ErrorPanelRef', {
+    'url': str,
+    'error': str,
+    'reason': str,
+})
 Event = Literal[
     'pre_close',
     'render',
@@ -161,7 +176,7 @@ PhantomRefData = TypedDict('PhantomRefData', {
     'is_hidden': bool,
 })
 OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
-OnErrorHandler = Callable[[str], None]
+OnErrorHandler = Callable[[str, Exception], None]
 OnFinishHandler = Callable[[List['CachedImage'], float], None]
 RegionRange = Literal['folding', 'all', 'pre-section', 'auto']
 RenderMethod = Literal['rescan', 'unsafe']
@@ -182,6 +197,7 @@ ViewStates = TypedDict(
     { 
         # Should be `True` from the moment a view gains focus.
         'initialized': bool, 
+        'error_refs': Dict[str, ErrorPanelRef],
         # Indicate a view is downloading images in background. This 
         # implies that calling the command directly might be unsafe and 
         # could potentially initiate the reloading of images already in 
@@ -200,6 +216,14 @@ ViewStates = TypedDict(
         # the behavior of image responsiveness, albeit with an expensive 
         # effort.
         'viewport_extent': Tuple[float, float],
+    }
+)
+PanelStates = TypedDict(
+    'PanelStates',
+    {
+        'view_id': int,
+        'change_id': Tuple[int, int, int],
+        'lines_refs': List[Tuple[Region, ErrorPanelRef]]
     }
 )
 
@@ -236,6 +260,8 @@ def context_data(view: View) -> ViewStates:
     # We should set the states default here
     if 'initialized' not in view_state:
         view_state['initialized'] = False
+    if 'error_refs' not in view_state:
+        view_state['error_refs'] = dict()
     if 'is_downloading' not in view_state:
         view_state['is_downloading'] = False
     if 'prev_action' not in view_state:
@@ -243,6 +269,28 @@ def context_data(view: View) -> ViewStates:
     if 'viewport_extent' not in view_state:
         view_state['viewport_extent'] = view.viewport_extent()
     return view_state
+
+
+def context_data_panel(panel: View) -> PanelStates:
+    """
+    Like context_data() but for panels
+    """
+    panel_states = ContextData.use(panel)
+    if 'view_id' not in panel_states:
+        panel_states['view_id'] = -1
+    if 'change_id' not in panel_states:
+        panel_states['change_id'] = [-1, -1, -1]
+    if 'lines_refs' not in panel_states:
+        panel_states['lines_refs'] = []
+    return panel_states
+
+
+def prefixed_output_panel(name: str) -> str:
+    """
+    Add the prefix `output.` before the output panel name to be able to 
+    open it with the `show_panel` command.
+    """
+    return 'output.{}'.format(name)
 
 
 def startup(value: Startup) -> StartupValue:
@@ -323,6 +371,7 @@ def fetch_or_load_image(
     timeout: Optional[float] = None,
     chunk_size: Optional[int] = None,
     termination_hook: Optional[Callable[[], bool]] = None,
+    timeout_per_megabyte: Optional[Union[int, float]] = None,
 ) -> Optional[bytes]:
     """
     Remote fetch or load from local the image binary based on the 
@@ -331,35 +380,32 @@ def fetch_or_load_image(
     :param      url:      Accepts url or local file path
     :param      timeout:  Timeout for HTTP requests (None by default).
     """
-    try:
-        # Handle the case of the current working directory is a http/https url
-        if cwd.startswith('http:') or cwd.startswith('https:'):
-            relative_path = url
-            absolute_url = resolve_remote(relative_path, cwd)
-            response = download_binary(
-                absolute_url,
-                timeout,
-                chunk_size,
-                termination_hook)
-            return response
-        # Handle the case of the provided url is already absolute
-        elif url.startswith('http:') or url.startswith('https'):
-            response = download_binary(
-                url,
-                timeout,
-                chunk_size,
-                termination_hook)
-            return response
-        # Handle the case of the provided url is a local file path
-        else:
-            relative_path = url
-            absolute_path = resolve_local(relative_path, cwd)
-            with open(absolute_path, 'rb') as file:
-                return file.read()
-    except Exception as error:
-        print(error)
-        traceback.print_tb(error.__traceback__)
-        return None
+    # Handle the case of the current working directory is a http/https url
+    if cwd.startswith('http:') or cwd.startswith('https:'):
+        relative_path = url
+        absolute_url = resolve_remote(relative_path, cwd)
+        response = download_binary(
+            absolute_url,
+            timeout,
+            chunk_size,
+            termination_hook,
+            timeout_per_megabyte)
+        return response
+    # Handle the case of the provided url is already absolute
+    elif url.startswith('http:') or url.startswith('https'):
+        response = download_binary(
+            url,
+            timeout,
+            chunk_size,
+            termination_hook,
+            timeout_per_megabyte)
+        return response
+    # Handle the case of the provided url is a local file path
+    else:
+        relative_path = url
+        absolute_path = resolve_local(relative_path, cwd)
+        with open(absolute_path, 'rb') as file:
+            return file.read()
 
 
 def find_current_headline(point: Point, hregions: List[Region]) -> Region:
@@ -459,6 +505,26 @@ def is_folding_section(view: View) -> bool:
         if node.start_row == row and not node.is_folded(view):
             return True
     return False
+
+
+def get_current_region(
+    view: View, 
+    tuple_region: Tuple[int, int],
+    change_id: Optional[int] = None
+) -> Region:
+    """
+    Retrieve the current region that has been changed based on the 
+    `change_id`. Sometimes it may not be entirely reliable, so avoid 
+    excessive reliance on it.
+    """
+    region = Region(*tuple_region)
+    current_region = view.transform_region_from(region, change_id)
+    if current_region.a != -1 and current_region.b != -1:
+        return current_region
+    current_region = view.transform_region_from(region, [0, 0, 0])
+    if current_region.a != -1 and current_region.b != -1:
+        return current_region
+    return region
 
 
 def get_cwd(view: View) -> str:
@@ -779,6 +845,28 @@ class OrgExtraImage(sublime_plugin.EventListener):
 
 
 
+class ErrorPanel(sublime_plugin.EventListener):
+    """
+    Handle events for the error output panel.
+    """
+    def on_selection_modified(self, view: View):
+        """
+        Jump to the region of the corresponding error line when the 
+        user clicks within the error output panel.
+        """
+        window = view.window()
+        if not window:
+            return None
+        output_panel = view.window().find_output_panel(ERROR_PANEL_NAME)
+        if not output_panel:
+            return None
+        if view == output_panel:
+            sel = view.sel()
+            row, _ = view.rowcol(sel[0].a)
+            view.window().run_command(COMMAND_JUMP_TO_ERROR, { 'index': row })
+
+
+
 class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     """
     An improved version of the legacy org_show_images, with the ability 
@@ -849,12 +937,21 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if len(phantomless):
                 self.create_placeholder_phantoms(phantomless)
 
+            exc_list = []
+            change_id = view.change_id()
             listener_id = uuid4().hex
             measurement = TimeMeasurement()
-            fetch_status = self.use_fetch_status_indicator(region_range, len(urls))
-            render_status = self.use_render_status_indicator(listener_id, measurement)
-
             instant_render = settings.Get(SETTING_INSTANT_RENDER, False)
+            fetch_status = self.use_fetch_status_indicator(region_range, len(urls))
+            render_status = self.use_render_status_indicator(
+                listener_id, 
+                measurement,
+                on_finish = lambda: self.handle_fetch_exceptions(
+                    selected_region,
+                    change_id,
+                    exc_list,
+                ) if not instant_render else None
+            )
 
             fetch_status.start()
             measurement.start_fetch()
@@ -888,15 +985,27 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             view_state = context_data(view)
             view_state['is_downloading'] = True
 
+            timeout = settings.Get(SETTING_DEFAULT_TIMEOUT, None) or None
+            tpm = settings.Get(SETTING_TIMEOUT_PER_MEGABYTE, None) or MAX_TPM
+
             def post_download_handler(image: CachedImage):
                 fetch_status.succeed()
 
             def post_finish_handler(images: List[CachedImage], timecost: float):
+                view_state['is_downloading'] = False
                 fetch_status.stop(timecost)
                 if not instant_render:
                     render_status.start()
                     measurement.start_render()
-                view_state['is_downloading'] = False
+                else:
+                    self.handle_fetch_exceptions(
+                        selected_region,
+                        change_id,
+                        exc_list)
+
+            def exception_handler(url: str, error: Exception):
+                fetch_status.failed()
+                exc_list.append((url, error))
 
             # Download non-cached images
             sublime.set_timeout_async(
@@ -907,12 +1016,14 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         selected_region, 
                         post_download_handler,
                     ),
-                    on_error = lambda: fetch_status.failed(),
+                    on_error = exception_handler,
                     on_finish = self.on_threads_finished(
                         selected_region, 
                         emit_args = listener_id,
                         then = post_finish_handler,
-                    )
+                    ),
+                    timeout = timeout,
+                    timeout_per_megabyte = tpm
                 )
             )
                         
@@ -983,6 +1094,33 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             args = {
                 'region': tuple_region,
                 'images': images
+            }
+        )
+
+
+    def handle_fetch_exceptions(
+        self, 
+        selected_region: Region,
+        change_id: int,
+        exc_list: List[DLException]) -> None:
+        """
+        Show an output panel indicating what errors have occurred.
+        """
+        view_state = context_data(self.view)
+        error_refs = view_state['error_refs']
+        error_refs.clear()
+        for exc in exc_list:
+            url, exception = exc
+            error_refs[url] = {
+                'url': url,
+                'error': exception.__class__.__name__,
+                'reason': str(exception)
+            }
+        self.view.run_command(COMMAND_SHOW_ERROR,
+            args = {
+                'view_id': self.view.id(),
+                'change_id': change_id,
+                'selected_region': selected_region.to_tuple(),
             }
         )
 
@@ -1084,7 +1222,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         on_data: Optional[OnDataHandler] = None,
         on_error: Optional[OnErrorHandler] = None,
         on_finish: Optional[OnFinishHandler] = None,
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        timeout_per_megabyte: Optional[Union[int, float]] = None,
     ) -> List[CachedImage]:
         """
         Run threads of fetching image operations in parallel, where each 
@@ -1113,7 +1252,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         on_data, 
                         on_error, 
                         timeout,
-                        flag),
+                        flag,
+                        timeout_per_megabyte),
                     pools,
                     name = THREAD_NAME
                 ))
@@ -1152,6 +1292,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         on_error: Optional[OnErrorHandler] = None,
         timeout: Optional[float] = None,
         stop_event: Optional[threading.Event] = None,
+        tpm: Optional[Union[int, float]] = None,
     ) -> List[CachedImage]:
         """
         This method specifies what a thread should do, typically 
@@ -1163,30 +1304,38 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if isinstance(stop_event, threading.Event) \
             else None
         for url in urls:
-            resolved_url = resolve_local(url, cwd)
-            loaded_binary = None
-            cached_binary = ImageCache.get(resolved_url)
-            if type(cached_binary) is bytes:
-                loaded_binary = cached_binary
-                loaded_image = cached_image(url, resolved_url, len(loaded_binary))
-                loaded_images.append(loaded_image)
-            else:
-                loaded_binary = fetch_or_load_image(
-                    url, 
-                    cwd, 
-                    timeout,
-                    termination_hook = termination_hook)
-                loaded_image = cached_image(url, resolved_url, len(loaded_binary or ''))
-                loaded_images.append(loaded_image)
-                if type(loaded_binary) is bytes:
-                    ImageCache.set(resolved_url, loaded_binary)
-            if isinstance(stop_event, threading.Event):
-                if stop_event.is_set():
-                    raise ThreadTermination()
-            if loaded_binary is None and callable(on_error):
-                safe_call(on_error, [url])
-            elif callable(on_data):
-                safe_call(on_data, [loaded_image, loaded_images])
+            try:
+                resolved_url = resolve_local(url, cwd)
+                loaded_binary = None
+                cached_binary = ImageCache.get(resolved_url)
+                if type(cached_binary) is bytes:
+                    loaded_binary = cached_binary
+                    loaded_image = cached_image(url, resolved_url, len(loaded_binary))
+                    loaded_images.append(loaded_image)
+                else:
+                    loaded_binary = fetch_or_load_image(
+                        url, 
+                        cwd, 
+                        timeout,
+                        termination_hook = termination_hook,
+                        timeout_per_megabyte = tpm)
+                    loaded_image = cached_image(url, resolved_url, len(loaded_binary or ''))
+                    loaded_images.append(loaded_image)
+                    if type(loaded_binary) is bytes:
+                        ImageCache.set(resolved_url, loaded_binary)
+                if isinstance(stop_event, threading.Event):
+                    if stop_event.is_set():
+                        raise ThreadTermination()
+                if loaded_binary is None and callable(on_error):
+                    safe_call(on_error, [
+                        url, 
+                        CorruptedImage('got a corrupted image')
+                    ])
+                elif callable(on_data):
+                    safe_call(on_data, [loaded_image, loaded_images])
+            except Exception as error:
+                safe_call(on_error, [url, error])
+                continue
         return loaded_images
 
 
@@ -1214,7 +1363,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self,
         listener_id: str,
         measurement: 'TimeMeasurement',
-        update_interval: Optional[int] = 100
+        update_interval: Optional[int] = 100,
+        on_finish: Optional[Callable] = None,
     ) -> SublimeStatusIndicator:
         """
         Setup a loading indicator with messages on the status bar
@@ -1252,6 +1402,8 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                     )
                 )
                 status.stop(accumulated_timecost)
+                if callable(on_finish):
+                    safe_call(on_finish)
 
         emitter.on(render, render_event_handler)
         emitter.once(render_finish, render_finish_handler)
@@ -1617,7 +1769,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         indent_level: int = 0, 
         with_attr: bool = False) -> bool:
         """
-        Render the image
+        Render the image.
         """
         try:
             width, height = int(image_width), int(image_height)
@@ -1662,6 +1814,174 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             resolved_url_dict[original_url] = image.get('resolved_url')
         return resolved_url_dict
 
+
+
+class OrgExtraImageJumpToErrorCommand(sublime_plugin.WindowCommand):
+    """
+    Jump to the region containing errors.
+    """
+    def run(self, index: int) -> None:
+        try:
+            panel = self.window.find_output_panel(ERROR_PANEL_NAME)
+            if not panel:
+                return None
+            panel_state = context_data_panel(panel)
+            lines_refs = panel_state['lines_refs']
+            if index >= len(lines_refs):
+                return None
+            view_id = panel_state.get('view_id')
+            change_id = panel_state.get('change_id')
+            target_view = get_view_by_id(view_id)
+            if not target_view:
+                return None
+            region, _ = lines_refs[index]
+            current_region = get_current_region(
+                target_view, 
+                region.to_tuple(),
+                change_id)
+            row, col = target_view.rowcol(current_region.a)
+            self.window.focus_view(target_view)
+            move_to(
+                target_view, 
+                row, 
+                col, 
+                extend = len(current_region), 
+                animate = True
+            )
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+
+
+
+class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
+    """
+    Show an output panel indicating what errors have occurred.
+    """
+    ERROR_LINE = '{}. [[{}]] {}: {}'
+
+    def run(
+        self,
+        edit,
+        view_id: int,
+        change_id: int,
+        selected_region: Optional[Tuple[int, int]] = None
+    ):
+        try:
+            if not matching_context(self.view):
+                return None
+            target_view = get_view_by_id(view_id)
+            if not matching_context(target_view):
+                return None
+            panel = self.get_panel(target_view)
+            any_error = self.update_panel(
+                edit, 
+                panel, 
+                target_view,
+                change_id,
+                selected_region)
+            if any_error:
+                self.show_panel(panel)
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+
+
+    def show_panel(self, panel: View) -> None:
+        panel.show(0)
+        self.view.window().run_command('show_panel',
+            args = {
+                'panel': prefixed_output_panel(ERROR_PANEL_NAME)
+            }
+        )
+
+
+    def update_panel(
+        self, 
+        edit, 
+        panel: View, 
+        view: View,
+        change_id: id,
+        selected_region: Optional[Tuple[int, int]] = None
+    ) -> bool:
+        view_state = context_data(view)
+        panel_state = context_data_panel(panel)
+        error_refs = view_state['error_refs']
+        lines_refs = panel_state['lines_refs']
+
+        if not error_refs:
+            return False
+
+        tuple_region = selected_region or (0, view.size())
+        region = Region(*tuple_region)
+        href_regions = find_by_selector_in_region(
+            view,
+            region,
+            SELECTOR_ORG_LINK_TEXT_HREF)
+        number_of_lines = len(view.lines(Region(0, view.size())))
+        pad_length = len(str(number_of_lines)) + 1
+        panel_text = []
+
+        if view.id() != panel_state['view_id']:
+            panel_state['view_id'] = view.id()
+
+        panel_state['change_id'] = change_id
+        lines_refs.clear()
+        panel.set_read_only(False)
+        panel.erase(edit, Region(0, panel.size()))
+        for region in href_regions:
+            url = view.substr(region)
+            if url in error_refs:
+                ref = error_refs[url]
+                error, reason = ref.get('error'), ref.get('reason')
+                row, _ = view.rowcol(region.a)
+                line_text = self.ERROR_LINE.format(
+                    str(row + 1).rjust(pad_length, ' '), 
+                    url, 
+                    error, 
+                    reason)
+                panel_text.append(line_text)
+                lines_refs.append((region, ref))
+        panel.insert(edit, 0, '\n'.join(panel_text))
+        panel.set_read_only(True)
+        return len(panel_text) > 0
+
+
+    @classmethod
+    def get_panel(cls, view: View) -> View:
+        panel = view.window().find_output_panel(ERROR_PANEL_NAME)
+        if not panel:
+            panel = view.window().create_output_panel(ERROR_PANEL_NAME)
+            cls.setup_panel(panel)
+        return panel
+
+
+    @classmethod
+    def get_panel_syntax(cls) -> sublime.Syntax:
+        syntax = get_syntax_by_scope('text.orgmode')
+        if not syntax:
+            syntax = get_syntax_by_scope('text.plain')
+        return syntax
+
+
+    @classmethod
+    def setup_panel(cls, panel: View) -> None:
+        settings = panel.settings()
+        settings.set('caret_extra_width', 0)
+        settings.set('drag_text', False)
+        settings.set('fold_buttons', False)
+        settings.set('highlight_line', True)
+        settings.set('line_numbers', False)
+        settings.set('scroll_past_end', False)
+        settings.set('spell_check', False)
+        settings.set('draw_indent_guides', False)
+        panel.set_read_only(True)
+        try:
+            panel.assign_syntax('scope:{}'.format(cls.get_panel_syntax().scope))
+        except Exception as error:
+            print(error)
+            traceback.print_tb(error.__traceback__)
+            panel.assign_syntax(cls.get_panel_syntax())
 
 
 class TimeMeasurement(object):
@@ -1744,5 +2064,13 @@ class ThreadTermination(Exception):
     """
     Indicates that a thread has been terminated from within by some 
     reason.
+    """
+    pass
+
+
+class CorruptedImage(Exception):
+    """
+    Indicate that the response has corrupted image binary, resulting in 
+    rendering impossibility.
     """
     pass

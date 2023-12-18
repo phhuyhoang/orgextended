@@ -414,4 +414,18 @@
     // facilitating instant image loading. Automatically delete all 
     // cached images if it exceeds this limit (Default size: 100 MB)
     "extra.image.cacheSize": 104857600,
+    // The default timeout (in seconds) for each image downloading 
+    // request, regardless of file size. 
+    // Default: 0 (no timeout)
+    "extra.image.defaultTimeout": 0,
+    // Timeout per megabyte, determined by the file size provided by 
+    // `Content-Length`. Utilized to dynamically determine timeouts 
+    // for minimal waiting, assisting users in avoiding long waits 
+    // during network congestion or loss of connection. If the target 
+    // site does not provide this value, it defaults to using 
+    // `extra.image.defaultTimeout` as the default timeout for 
+    // downloading the entire file.
+    // Default: 60 seconds per megabyte (equivalent to 5.86 seconds per 
+    // 100 KB)
+    "extra.image.timeoutPerMegabyte": 60,
 }
