@@ -174,6 +174,7 @@ PhantomRefData = TypedDict('PhantomRefData', {
     'height': float,
     'with_attr': bool,
     'is_hidden': bool,
+    'is_placeholder': bool,
 })
 OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
 OnErrorHandler = Callable[[str, Exception], None]
@@ -470,6 +471,10 @@ def ignore_unchanged(
         last_data = pm.get_data_by_pid(last_pid) or {}
         upper_line_region = lines[index - 1]
         attr_state = with_dimension_attributes(view, upper_line_region)
+
+        if last_data.get('is_placeholder') == True:
+            phantomless_regions.append(region)
+            continue
 
         if last_data.get('is_hidden') == True:
             if show_hidden:
@@ -1050,7 +1055,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
             if pm.has_phantom(image_region):
                 pid = pm.get_pid_by_region(image_region)
                 pm.erase_phantom(pid)
-            pm.add_phantom(image_region, '')
+            pm.add_phantom(image_region, '', { 'is_placeholder': True })
 
 
     def collect_image_urls(self, regions: List[Region]) -> Set[str]:
