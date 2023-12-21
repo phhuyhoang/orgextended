@@ -157,6 +157,7 @@ CachedImage = TypedDict('CachedImage', {
     'size': Optional[str],
     'region': Optional[Tuple[int, int]],
 })
+ChangeId = Tuple[int, int, int]
 DLException = Tuple[str, Exception]
 ErrorPanelRef = TypedDict('ErrorPanelRef', {
     'url': str,
@@ -223,7 +224,7 @@ PanelStates = TypedDict(
     'PanelStates',
     {
         'view_id': int,
-        'change_id': Tuple[int, int, int],
+        'change_id': ChangeId,
         'lines_refs': List[Tuple[Region, ErrorPanelRef]]
     }
 )
@@ -280,7 +281,7 @@ def context_data_panel(panel: View) -> PanelStates:
     if 'view_id' not in panel_states:
         panel_states['view_id'] = -1
     if 'change_id' not in panel_states:
-        panel_states['change_id'] = [-1, -1, -1]
+        panel_states['change_id'] = [0, 0, 0]
     if 'lines_refs' not in panel_states:
         panel_states['lines_refs'] = []
     return panel_states
@@ -1106,7 +1107,7 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     def handle_fetch_exceptions(
         self, 
         selected_region: Region,
-        change_id: int,
+        change_id: ChangeId,
         exc_list: List[DLException]) -> None:
         """
         Show an output panel indicating what errors have occurred.
@@ -1869,7 +1870,7 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
         self,
         edit,
         view_id: int,
-        change_id: int,
+        change_id: ChangeId,
         selected_region: Optional[Tuple[int, int]] = None
     ):
         try:
@@ -1906,7 +1907,7 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
         edit, 
         panel: View, 
         view: View,
-        change_id: id,
+        change_id: ChangeId,
         selected_region: Optional[Tuple[int, int]] = None
     ) -> bool:
         view_state = context_data(view)
