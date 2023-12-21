@@ -9,7 +9,7 @@ import sublime_plugin
 from math import ceil
 from collections import defaultdict
 from timeit import default_timer
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from OrgExtended.orgutil.util import safe_call, seconds_fmt
 from OrgExtended.orgutil.typecompat import Literal
@@ -323,9 +323,10 @@ class PhantomsManager:
 
     def __init__(self, view: sublime.View) -> None:
         self.view = view
-        self.pids = set()
-        self.key_refs = dict()
-        self.data_refs = dict()
+        self.pids = set()        # type: Set[int]
+        self.key_refs = dict()   # type: Dict[str, str]
+        self.data_refs = dict()  # type: Dict[str, Dict]
+        self.change_histories = []  # type: List[List[int]]
 
     def add_phantom(
         self,
@@ -338,6 +339,10 @@ class PhantomsManager:
         created phantoms, the adding action will be canceled.
         Return a phantom id that can be used to manipulate the 
         created phantom.
+        Note: This method only adds phantoms, doesn't track the 
+        replacement between them. If you want to replace an existing 
+        phantom and tracking them also, use .replace_phantom() instead 
+        of this method.
         """
         if self.will_cause_duplication(region):
             return -1
@@ -362,11 +367,28 @@ class PhantomsManager:
         self.kill_ref(pid)
         return True
 
+    def find_history(self, pid: int) -> Union[List[int], None]:
+        """
+        Find the phantom change history of any region. A change history 
+        is represented by a list of pids, with the last element being the 
+        latest pid used for that region.
+        """
+        for pid_history in self.change_histories:
+            if pid in pid_history:
+                return pid_history
+
     def get_all_overseeing_regions(self) -> List[sublime.Region]:
         """
         Get all available regions that have been attached with phantom.
         """
         return self.view.query_phantoms(list(self.pids))
+
+    def get_data_by_pid(self, pid: int) -> Optional[Dict]:
+        """
+        Get the relevant data that have been provided when the phantom
+        being initialize.
+        """
+        return self.data_refs.get(pid)
 
     def get_pid_by_region(
         self, 
@@ -390,14 +412,14 @@ class PhantomsManager:
         Find a region with a phantom nearby. If there aren't any such 
         regions, the return array will contain nothing.
         """
-        return self.view.query_phantom(pid)
+        return self.view.query_phantom(self.transform_pid(pid))
 
-    def get_data_by_pid(self, pid: int) -> Optional[Dict]:
+    def transform_pid(self, pid: int) -> int:
         """
-        Get the relevant data that have been provided when the phantom
-        being initialize.
+        
         """
-        return self.data_refs.get(pid)
+        history = self.find_history(pid)
+        return history[-1] if history else pid
 
     def has_phantom(self, region: sublime.Region) -> bool:
         """
@@ -422,6 +444,19 @@ class PhantomsManager:
             if intersecting:
                 return True
         return False
+
+    def update_history(self, pid: int, old_pid: Optional[int] = None) -> 'PhantomsManager':
+        """
+        Find and add a pid to the history of related pids. Related pids 
+        can be understood as pids that have previously pointed to the 
+        same initial region.
+        """
+        history = self.find_history(old_pid)
+        if not history:
+            history = []
+            self.change_histories.append(history)
+        history.append(pid)
+        return self
 
     def create_ref(
         self, 
