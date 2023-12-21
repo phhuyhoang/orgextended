@@ -1934,6 +1934,7 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
         lines_refs.clear()
         panel.set_read_only(False)
         panel.erase(edit, Region(0, panel.size()))
+        [view.substr(r) for r in href_regions]
         for region in href_regions:
             url = view.substr(region)
             if url in error_refs:
