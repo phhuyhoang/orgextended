@@ -1824,30 +1824,23 @@ class OrgExtraImageJumpToErrorCommand(sublime_plugin.WindowCommand):
             if not panel:
                 return None
             panel_state = context_data_panel(panel)
-            lines_refs = panel_state['lines_refs']
+            lines_refs = panel_state.get('lines_refs')
             if index >= len(lines_refs):
                 return None
             view_id = panel_state.get('view_id')
-            change_id = panel_state.get('change_id')
             target_view = get_view_by_id(view_id)
             if not target_view:
                 return None
-            region, _ = lines_refs[index]
-            current_region = get_current_region(
-                target_view, 
-                region.to_tuple(),
-                change_id)
-            row, col = target_view.rowcol(current_region.a)
+            pid, _ = lines_refs[index]
+            pm = PhantomsManager.of(target_view)
+            regions = pm.get_region_by_pid(pid)
+            if not regions:
+                return None
+            current_region = regions[0]
             self.window.focus_view(target_view)
-            move_to(
-                target_view, 
-                row, 
-                col, 
-                extend = len(current_region), 
-                animate = True
-            )
+            move_to_region(target_view, current_region, animate = True)
         except Exception as error:
-            print(error)
+            show_message(error)
             traceback.print_tb(error.__traceback__)
 
 
@@ -1893,51 +1886,56 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
 
 
     def update_panel(
-        self, 
-        edit, 
-        panel: View, 
+        self,
+        edit,
+        panel: View,
         view: View,
         selected_region: Optional[Tuple[int, int]] = None
     ) -> bool:
         view_state = context_data(view)
         panel_state = context_data_panel(panel)
-        error_refs = view_state['error_refs']
-        lines_refs = panel_state['lines_refs']
+        error_refs = view_state.get('error_refs')
+        lines_refs = panel_state.get('lines_refs')
 
         if not error_refs:
-            return False
+            return None
 
         tuple_region = selected_region or (0, view.size())
         region = Region(*tuple_region)
-        href_regions = find_by_selector_in_region(
-            view,
-            region,
-            SELECTOR_ORG_LINK_TEXT_HREF)
+        pm = PhantomsManager.of(view)
         number_of_lines = len(view.lines(Region(0, view.size())))
         pad_length = len(str(number_of_lines)) + 1
         panel_text = []
+        pids_by_row = {}
 
-        if view.id() != panel_state['view_id']:
+        if view.id() != panel_state.get('view_id'):
             panel_state['view_id'] = view.id()
 
-        panel_state['change_id'] = change_id
         lines_refs.clear()
         panel.set_read_only(False)
         panel.erase(edit, Region(0, panel.size()))
-        [view.substr(r) for r in href_regions]
-        for region in href_regions:
+        # Weird bug
+        [ (view.substr(r) for r in pm.get_region_by_pid(p)) for p in pm.pids ]
+        for pid in pm.pids:
+            regions = pm.get_region_by_pid(pid)
+            if not regions:
+                continue
+            region = regions[0]
             url = view.substr(region)
             if url in error_refs:
-                ref = error_refs[url]
-                error, reason = ref.get('error'), ref.get('reason')
                 row, _ = view.rowcol(region.a)
-                line_text = self.ERROR_LINE.format(
-                    str(row + 1).rjust(pad_length, ' '), 
-                    url, 
-                    error, 
-                    reason)
-                panel_text.append(line_text)
-                lines_refs.append((region, ref))
+                pids_by_row[row] = (pid, url)
+        for row in sorted(pids_by_row.keys()):
+            pid, url = pids_by_row[row]
+            ref = error_refs[url]
+            error, reason = ref.get('error'), ref.get('reason')
+            line_text = self.ERROR_LINE.format(
+                str(row + 1).rjust(pad_length, ' '),
+                url,
+                error,
+                reason)
+            panel_text.append(line_text)
+            lines_refs.append((pid, ref))
         panel.insert(edit, 0, '\n'.join(panel_text))
         panel.set_read_only(True)
         return len(panel_text) > 0
@@ -1978,6 +1976,7 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
             print(error)
             traceback.print_tb(error.__traceback__)
             panel.assign_syntax(cls.get_panel_syntax())
+
 
 
 class TimeMeasurement(object):
