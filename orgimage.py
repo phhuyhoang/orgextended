@@ -37,7 +37,6 @@ from os import path
 from uuid import uuid4
 from timeit import default_timer
 from sublime import Region, View
-from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from OrgExtended.pymitter import EventEmitter
 from OrgExtended.orgparse.startup import Startup as StartupValue
@@ -62,7 +61,7 @@ from OrgExtended.orgutil.sublime_utils import (
     get_syntax_by_scope,
     get_view_by_id,
     lines_from_region,
-    move_to, 
+    move_to_region, 
     region_between,
     set_temporary_status, 
     show_message,
@@ -177,6 +176,7 @@ PhantomRefData = TypedDict('PhantomRefData', {
     'is_hidden': bool,
     'is_placeholder': bool,
 })
+PID = int
 OnDataHandler = Callable[['CachedImage', List['CachedImage']], None]
 OnErrorHandler = Callable[[str, Exception], None]
 OnFinishHandler = Callable[[List['CachedImage'], float], None]
@@ -198,7 +198,9 @@ ViewStates = TypedDict(
     'ViewStates', 
     { 
         # Should be `True` from the moment a view gains focus.
-        'initialized': bool, 
+        'initialized': bool,
+        # Errors encountered while downloading images, collected for 
+        # the purpose of displaying them on the output panel 
         'error_refs': Dict[str, ErrorPanelRef],
         # Indicate a view is downloading images in background. This 
         # implies that calling the command directly might be unsafe and 
@@ -224,8 +226,7 @@ PanelStates = TypedDict(
     'PanelStates',
     {
         'view_id': int,
-        'change_id': ChangeId,
-        'lines_refs': List[Tuple[Region, ErrorPanelRef]]
+        'lines_refs': List[Tuple[PID, int, ErrorPanelRef]]
     }
 )
 
@@ -260,14 +261,10 @@ def context_data(view: View) -> ViewStates:
     """
     view_state = ContextData.use(view)
     # We should set the states default here
-    if 'initialized' not in view_state:
-        view_state['initialized'] = False
-    if 'error_refs' not in view_state:
-        view_state['error_refs'] = dict()
-    if 'is_downloading' not in view_state:
-        view_state['is_downloading'] = False
-    if 'prev_action' not in view_state:
-        view_state['prev_action'] = ''
+    view_state.setdefault('initialized', False)
+    view_state.setdefault('error_refs', dict())
+    view_state.setdefault('is_downloading', False)
+    view_state.setdefault('prev_action', '')
     if 'viewport_extent' not in view_state:
         view_state['viewport_extent'] = view.viewport_extent()
     return view_state
@@ -278,12 +275,8 @@ def context_data_panel(panel: View) -> PanelStates:
     Like context_data() but for panels
     """
     panel_states = ContextData.use(panel)
-    if 'view_id' not in panel_states:
-        panel_states['view_id'] = -1
-    if 'change_id' not in panel_states:
-        panel_states['change_id'] = [0, 0, 0]
-    if 'lines_refs' not in panel_states:
-        panel_states['lines_refs'] = []
+    panel_states.setdefault('view_id', -1)
+    panel_states.setdefault('lines_refs', [])
     return panel_states
 
 
@@ -944,7 +937,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 self.create_placeholder_phantoms(phantomless)
 
             exc_list = []
-            change_id = view.change_id()
             listener_id = uuid4().hex
             measurement = TimeMeasurement()
             instant_render = settings.Get(SETTING_INSTANT_RENDER, False)
@@ -954,7 +946,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 measurement,
                 on_finish = lambda: self.handle_fetch_exceptions(
                     selected_region,
-                    change_id,
                     exc_list,
                 ) if not instant_render else None
             )
@@ -980,7 +971,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                         cwd = cwd,
                         on_finish = self.on_threads_finished(
                             selected_region,
-                            # lambda timecost: fetch_status.stop(timecost) if not noncached_urls else None
                             emit_args = listener_id,
                             then = cache_post_finish_handler
                         )
@@ -1006,7 +996,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
                 else:
                     self.handle_fetch_exceptions(
                         selected_region,
-                        change_id,
                         exc_list)
 
             def exception_handler(url: str, error: Exception):
@@ -1052,11 +1041,13 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         and enables file editing while waiting for images to load.
         """
         pm = PhantomsManager.of(self.view)
+        pid = None
         for image_region in regions:
             if pm.has_phantom(image_region):
                 pid = pm.get_pid_by_region(image_region)
                 pm.erase_phantom(pid)
-            pm.add_phantom(image_region, '', { 'is_placeholder': True })
+            new_pid = pm.add_phantom(image_region, '', { 'is_placeholder': True })
+            pm.update_history(new_pid, pid)
 
 
     def collect_image_urls(self, regions: List[Region]) -> Set[str]:
@@ -1107,7 +1098,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
     def handle_fetch_exceptions(
         self, 
         selected_region: Region,
-        change_id: ChangeId,
         exc_list: List[DLException]) -> None:
         """
         Show an output panel indicating what errors have occurred.
@@ -1125,7 +1115,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         self.view.run_command(COMMAND_SHOW_ERROR,
             args = {
                 'view_id': self.view.id(),
-                'change_id': change_id,
                 'selected_region': selected_region.to_tuple(),
             }
         )
@@ -1389,7 +1378,6 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         render_finish = event_factory('render_finish', self.view)
 
         def render_event_handler(value: Any, image_region: Region):
-            print(value, listener_id)
             if value == listener_id:
                 counter.succeed += 1
                 status.set(message = render_message.format(MSG_RENDER_IMAGES, counter.succeed))
@@ -1484,7 +1472,8 @@ class OrgExtraHideThisImageCommand(sublime_plugin.TextCommand):
                 if pid is not None:
                     is_erased = pm.erase_phantom(pid)
                     if is_erased:
-                        pm.add_phantom(region, '', { 'is_hidden': True })
+                        new_pid = pm.add_phantom(region, '', { 'is_hidden': True })
+                        pm.update_history(new_pid, pid)
             else:
                 sel = view.sel()
                 region = view.expand_to_scope(
@@ -1532,7 +1521,8 @@ class OrgExtraHideImagesCommand(sublime_plugin.TextCommand):
                     is_erased = pm.erase_phantom(pid)
                     if is_erased:
                         erased_count += 1
-                        pm.add_phantom(region, '', { 'is_hidden': True })
+                        new_pid = pm.add_phantom(region, '', { 'is_hidden': True })
+                        pm.update_history(new_pid, pid)
 
             if erased_count > 0:
                 set_temporary_status(
@@ -1782,6 +1772,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             image_format = image_format_of(image_binary)
             space_indent = '&nbsp;' * (indent_level * 2)
             pm = PhantomsManager.of(self.view)
+            pid = None
             if image_format == 'svg':
                 html = image_to_string(image_binary)
             else:
@@ -1795,10 +1786,11 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
                 pid = pm.get_pid_by_region(image_region)
                 pm.erase_phantom(pid)
             
-            pm.add_phantom(image_region, html, { 
+            new_pid = pm.add_phantom(image_region, html, { 
                 'width': width, 
                 'height': height,
                 'with_attr': with_attr })
+            pm.update_history(new_pid, pid)
             return True
         except Exception as error:
             print(error)
@@ -1870,7 +1862,6 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
         self,
         edit,
         view_id: int,
-        change_id: ChangeId,
         selected_region: Optional[Tuple[int, int]] = None
     ):
         try:
@@ -1884,7 +1875,6 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
                 edit, 
                 panel, 
                 target_view,
-                change_id,
                 selected_region)
             if any_error:
                 self.show_panel(panel)
@@ -1907,7 +1897,6 @@ class OrgExtraImageShowErrorCommand(sublime_plugin.TextCommand):
         edit, 
         panel: View, 
         view: View,
-        change_id: ChangeId,
         selected_region: Optional[Tuple[int, int]] = None
     ) -> bool:
         view_state = context_data(view)
