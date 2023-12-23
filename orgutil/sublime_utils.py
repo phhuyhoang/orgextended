@@ -172,9 +172,27 @@ def lines_from_region(view: sublime.View, region: sublime.Region) -> List[str]:
     return [view.substr(line) for line in lines]
 
 
-def move_to(
+def move_to_region(
+    view: sublime.View, 
+    region: sublime.Region, 
+    animate: bool = False
+) -> None:
+    """
+    Move the cursor to a specific position in the view and select that 
+    region
+
+    :param      animate:  Smoothy scroll
+    """
+    selection = view.sel()
+    if len(selection):
+        selection.clear()
+    selection.add_all([region])
+    view.show_at_center(region, animate)
+
+
+def move_to_rowcol(
     view: sublime.View,
-    row: Union[int, None] = None,
+    row: int = 0,
     col: int = 0,
     extend: int = 0,
     animate: bool = False,
@@ -185,20 +203,9 @@ def move_to(
     :param      extend:   Number of characters to extend the selection to the right
     :param      animate:  Smoothy scroll
     """
-    if not row:
-        return None
     text_point = view.text_point(row, col)
-    region = sublime.Region(text_point)
-    view.sel().clear()
-    view.sel().add(region)
-    view.show_at_center(text_point, animate)
-    if extend > 0:
-        line = view.line(region)
-        for _ in range(extend):
-            col += 1
-            if col > len(line):
-                break
-            view.run_command('move', { "by": "characters", "forward": True, "extend": True })
+    region = sublime.Region(text_point, text_point + extend)
+    move_to_region(view, region, animate)
 
 
 def region_between(
