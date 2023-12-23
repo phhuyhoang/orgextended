@@ -91,6 +91,7 @@ SETTING_FILENAME = settings.configFilename + ".sublime-settings"
 
 COMMAND_RENDER_IMAGES = 'org_extra_render_images'
 COMMAND_SHOW_IMAGES = 'org_extra_show_images'
+COMMAND_SHOW_THIS_IMAGE = 'org_extra_show_this_image'
 COMMAND_HIDE_THIS_IMAGE = 'org_extra_hide_this_image'
 COMMAND_HIDE_IMAGES = 'org_extra_hide_images'
 COMMAND_SHOW_ERROR = 'org_extra_image_show_error'
@@ -154,7 +155,8 @@ CachedImage = TypedDict('CachedImage', {
     'original_url': Optional[str],
     'resolved_url': str,
     'size': Optional[str],
-    'region': Optional[Tuple[int, int]],
+    'regions': List[Tuple[int, int]],
+    'pids': List[int],
 })
 ChangeId = Tuple[int, int, int]
 DLException = Tuple[str, Exception]
@@ -240,7 +242,12 @@ def event_factory(event: Event, view: Optional[View] = None) -> str:
     return event + suffix
 
 
-def cached_image(url: str, rurl: str, size: int = 0, region: Tuple[int, int] = None) -> CachedImage:
+def cached_image(
+    url: str, 
+    rurl: str, 
+    size: int = 0, 
+    pids: List[int] = [],
+    regions: List[Tuple[int, int]] = []) -> CachedImage:
     """
     Return an object can be used to transfer between commands when one 
     needs to signal to the others that the image has been loaded and 
@@ -249,8 +256,9 @@ def cached_image(url: str, rurl: str, size: int = 0, region: Tuple[int, int] = N
     return { 
         'original_url': url, 
         'resolved_url': rurl, 
-        'data_size': size,
-        'region': list(region) if type(region) is tuple else region
+        'size': size,
+        'regions': list(regions),
+        'pids': list(pids)
     }
 
 
@@ -709,7 +717,10 @@ class OrgExtraImage(sublime_plugin.EventListener):
             for region in image_regions:
                 url = view.substr(region)
                 rurl = resolve_local(url, cwd)
-                ci = cached_image(url, rurl, region = region.to_tuple())
+                ci = cached_image(
+                    url, 
+                    rurl,
+                    regions = [region.to_tuple()])
                 cached_images.append(ci)
             view.set_read_only(True)
             emitter.once(render_finish, render_finish_handler)
@@ -1127,15 +1138,30 @@ class OrgExtraShowImagesCommand(sublime_plugin.TextCommand):
         """
         Implement the instant render behaviour.
         """
+        pm = PhantomsManager.of(self.view)
         def on_data(cached_image: CachedImage, images: List[CachedImage]):
             instant_render = settings.Get(SETTING_INSTANT_RENDER, False)
             # Render that image and exclude it from re-rendering in the 
             # 'finish' event.
             if instant_render:
+                pids = []
+                cached_image['pids'] = pids
+                for pid in pm.pids:
+                    regions = pm.get_region_by_pid(pid)
+                    if not regions:
+                        continue
+                    substr = self.view.substr(regions[0])
+                    if substr == cached_image.get('original_url'):
+                        cached_image['pids'].append(pid)
+                # With pids, we may no longer need to concern ourselves 
+                # with rescanning, thereby accelerating image rendering 
+                # and making unsafe rendering safer.
+                rescan = len(pids) == 0
                 self.view.run_command(COMMAND_RENDER_IMAGES, 
                     args = {
                         'region': region.to_tuple(),
                         'images': [cached_image],
+                        'rescan': rescan
                     }
                 )
                 images.remove(cached_image)
@@ -1633,24 +1659,82 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         return width, height
 
 
-    def get_image_binary(self, image: CachedImage, cwd: str) -> Optional[bytes]:
+    def get_image_binary(
+        self,
+        image: CachedImage
+    ) -> Union[bytes, None]:
+        """
+        Attempt to retrieve the binary image by trying each entry in the 
+        CachedImage.
+        """
+        resolved_url = image.get('resolved_url')
+        original_url = image.get('original_url')
+        if ImageCache.has(resolved_url):
+            return ImageCache.get(resolved_url)
+        else:
+            return self.get_image_binary_kv('original_url', original_url)
+
+
+    def get_image_binary_kv(
+        self, 
+        key: Literal[
+            'resolved_url',
+            'original_url',
+            'region',
+            'pid'
+        ],
+        value: Union[str, int],
+        cwd: Optional[str] = None,
+    ) -> Union[bytes, None]:
         """
         Retrieve image binary from one of the keys provided by the 
         CachedImage object.
         """
-        resolved_url = None
-        if image.get('resolved_url'):
-            resolved_url = image['resolved_url']
-        elif image.get('original_url'):
-            url = image.get('original_url')
-            resolved_url = resolve_local(url, cwd)
-        elif image.get('region'):
-            tuple_region = image.get('region')
-            if type(tuple_region) is tuple:
-                region = Region(*tuple_region)
-                url = self.view.substr(region)
-                resolved_url = resolve_local(url, cwd)
-        return ImageCache.get(resolved_url)
+        if key == 'resolved_url':
+            return ImageCache.get(value)
+        elif key == 'original_url':
+            cwd = cwd or get_cwd(self.view)
+            return ImageCache.get(resolve_local(value, cwd))
+        elif key == 'pid':
+            pm = PhantomsManager.of(self.view)
+            regions = pm.get_region_by_pid(value)
+            if not regions:
+                return None
+            region = regions.pop(0)
+            return ImageCache.get(self.view.substr(region))
+        elif key == 'region':
+            return ImageCache.get(self.view.substr(value))
+        else:
+            return None
+
+
+    def handle_render(
+        self, 
+        region: Region, 
+        image_bin: bytes,
+        lines: List[str] = [],
+        extent: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """
+        DRY render method.
+        """
+        line_region = self.view.line(region)
+        line_text = self.view.substr(line_region)
+        index = lines.index(line_text)
+        preceding_line = lines[index - 1] if index > 0 else None
+        indent_level = len(line_text) - len(line_text.lstrip())
+        vw, _ = self.view.viewport_extent() if not extent else extent
+        width, height, is_resized = self.extract_image_dimensions(
+            preceding_line,
+            image_bin)
+        width, height = self.fit_to_viewport(vw, width, height)
+        self.render_image(
+            region, 
+            image_bin,
+            width,
+            height,
+            indent_level,
+            is_resized)
 
 
     def handle_rescan_render(
@@ -1722,34 +1806,32 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         try:
             entire = Region(0, self.view.size())
             lines = lines_from_region(self.view, entire)
-            cwd = get_cwd(self.view)
-            viewport_width, _ = self.view.viewport_extent()
+            extent = self.view.viewport_extent()
             for image in images:
-                tuple_region = image.get('region')
-                image_binary = self.get_image_binary(image, cwd)
-                if not image_binary or not tuple_region:
-                    continue
-                region = Region(*tuple_region)
-                line_region = self.view.line(region)
-                line_text = self.view.substr(line_region)
-                index = lines.index(line_text)
-                preceding_line = lines[index - 1] if index > 0 else None
-                indent_level = len(line_text) - len(line_text.lstrip())
-                width, height, is_resized = self.extract_image_dimensions(
-                    preceding_line, 
-                    image_binary)
-                width, height = self.fit_to_viewport(
-                    viewport_width, 
-                    width, 
-                    height)
-                self.render_image(
-                    region,
-                    image_binary,
-                    width,
-                    height,
-                    indent_level,
-                    is_resized)
-                emitter.emit(render, emit_args, region)
+                pids = image.get('pids', [])
+                binary = self.get_image_binary(image)
+                regions_set = set(
+                    map(
+                        lambda r: tuple(r), 
+                        image.get('regions', [])
+                    )
+                )
+                for pid in pids:
+                    pm = PhantomsManager.of(self.view)
+                    regions = pm.get_region_by_pid(pid)
+                    if regions:
+                        regions_set.add(regions[0].to_tuple())
+                for tuple_region in regions_set:
+                    region = Region(*tuple_region)
+                    image_binary = binary or \
+                        self.get_image_binary_kv('region', region)
+                    if image_binary:
+                        self.handle_render(
+                            region,
+                            image_binary,
+                            lines,
+                            extent)
+                        emitter.emit(render, emit_args, region)
             emitter.emit(render_finish, emit_args)
         except Exception as error:
             emitter.emit(render_error, emit_args, error)
@@ -1798,7 +1880,7 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
             return False
 
 
-    def to_resolved_url_dict(self, images: List[CachedImage]) -> Dict[str, str]:
+    def to_resolved_url_dict(self, images: List[CachedImage]) -> Dict[str, CachedImage]:
         """
         Converting a list of images into a dictionary, allowing us to 
         quickly retrieve the corresponding resolved absolute link using 

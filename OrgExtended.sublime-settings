@@ -401,7 +401,7 @@
     "extra.image.useLazyload": true,
     // Enabling this option will force the image to render as soon as 
     // it's fully downloaded.
-    "extra.image.instantRender": false,
+    "extra.image.instantRender": true,
     // The scaling factor used to calculate the final output size in pixel 
     // of images specified in relative units (%, vw, vh).
     // Examples:
