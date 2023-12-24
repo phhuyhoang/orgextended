@@ -5,9 +5,7 @@ Sublime Text utility functions
 import re
 import uuid
 import sublime
-import sublime_plugin
 from math import ceil
-from collections import defaultdict
 from timeit import default_timer
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -124,6 +122,43 @@ def get_cursor_region(view: sublime.View) -> sublime.Region:
         begin, end = initial_cursor.begin(), initial_cursor.end()
         return sublime.Region(begin, end)
     return sublime.Region(-1, -1)
+
+
+def get_region_by_linenum(
+    view: sublime.View,
+    line_start: float,
+    line_end: float = float('-inf')
+) -> sublime.Region:
+    """
+    Same as get_region_by_rows but apply for line number.
+    """
+    return get_region_by_rows(line_start - 1, line_end - 1)
+
+
+def get_region_by_rows(
+    view: sublime.View, 
+    row_start: float, 
+    row_end: float = float('-inf')
+) -> sublime.Region:
+    """
+    Example:
+    ```py
+    print(get_region_by_rows(view, 0))
+    # (0, 3)
+    print(get_region_by_rows(view, 0, 1))
+    # (0, 34)
+    ```
+    """
+    start_pt = view.text_point(row_start, 0)
+    if row_end < row_start or row_start < 0:
+        return view.line(start_pt)
+    else:
+        region = view.line(start_pt)
+        for row in range(row_start + 1, row_end + 1):
+            pt = view.text_point(row)
+            row_region = view.line(pt)
+            region = region.cover(row_region)
+        return region
 
 
 def get_syntax_by_scope(scope: str) -> Union[sublime.Syntax, None]:
@@ -339,7 +374,7 @@ class PhantomsManager:
         self,
         region: sublime.Region,
         html: str, 
-        data: Dict = {}
+        data: Dict = {},
     ) -> int:
         """
         Adds a phantom. If the region causes a collision with other 
@@ -408,7 +443,7 @@ class PhantomsManager:
         Return `None` if the provided region does not have any
         created phantom nearby.
         """
-        for pid in self.pids:
+        for pid in self.pids.copy():
             regions = self.get_region_by_pid(pid)
             if region in regions:
                 return pid
@@ -500,7 +535,7 @@ class PhantomsManager:
         return key if key not in key_refs.values() else cls.create_unique_key(key_refs)
 
     @classmethod
-    def is_being_managed(cls, view: sublime.View) -> bool:
+    def available_for(cls, view: sublime.View) -> bool:
         """
         Check if a view is being managed. Only returns `True` if `use()` 
         has been used at least once for the view and has not been 
@@ -528,7 +563,7 @@ class PhantomsManager:
         return cls.hub[vid]
 
     @classmethod
-    def remove(cls, view: sublime.View) -> bool:
+    def abandon(cls, view: sublime.View) -> bool:
         """
         Remove the current view from manage context and delete all
         relevant data. Calling `use()` if you want to let the class
@@ -598,7 +633,7 @@ class SublimeStatusIndicator:
             duration = ceil(timer_result * 1000) / 1000
         else:
             self._timer.end = default_timer()
-            duration = ceil((self._timer.end - self._timer.start) * 1000) / 1000
+            duration = self._timer.end - self._timer.start
         if self._counter.total is not None:
             status_message = '{} [{}✔️/{}❌/{}❔] ({})'.format(
                 self.finish_message,
@@ -608,10 +643,7 @@ class SublimeStatusIndicator:
                 seconds_fmt(duration)
             )
         else:
-            status_message = '{} ({})'.format(
-                self.finish_message,
-                seconds_fmt(duration)
-            )
+            status_message = self.finish_message
         self._stopped = True
         self.view.set_status(self.name, status_message)
         sublime.set_timeout(lambda: self.clear(), 3000)
