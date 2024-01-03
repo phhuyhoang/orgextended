@@ -1698,7 +1698,9 @@ class OrgExtraRenderImagesCommand(sublime_plugin.TextCommand):
         else:
             base64 = image_to_base64(image_binary)
             size = image.get('size')
-            title = '{} ({})'.format(
+            title = '[{}x{}] {} ({})'.format(
+                width,
+                height,
                 image.get('resolved_url'),
                 sizeof_fmt(size if size > 0 else len(image_binary))
             )
