@@ -131,7 +131,7 @@ SETTING_CACHE_SIZE = 'extra.image.cacheSize'
 SETTING_DEFAULT_TIMEOUT = 'extra.image.defaultTimeout'
 SETTING_TIMEOUT_PER_MEGABYTE = 'extra.image.timeoutPerMegabyte'
 
-LIST_SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif"]
+LIST_SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
 LIST_VAL_ORG_ATTR = ['width', 'height']
 LIST_LIT_ORG_ATTR = ['type']
 LIST_OUTSIDE_SECTION_REGION_RANGES = ['all', 'pre-section']
